@@ -151,6 +151,11 @@ export default Plugin.define({
     let pending = false
     let busy = false
     let idle = Promise.resolve()
+    let disposed = false
+    // A refresh can still be running when the plugin is unloaded; its result must not overwrite a newer view.
+    const show = (next: View | undefined) => {
+      if (!disposed) setView(next)
+    }
 
     const remind = async (kind: "outdated" | "setup", force: boolean, show: () => void) => {
       if (!force && Date.now() - reminders[kind] < staleMs) return
@@ -174,7 +179,7 @@ export default Plugin.define({
       try {
         const state = await repoState(repo)
         if (state !== "ready") {
-          setView({ state })
+          show({ state })
           if (state === "no-repo")
             await remind("setup", force, () =>
               context.ui.toast.show({
@@ -187,7 +192,7 @@ export default Plugin.define({
           return
         }
         const status = await readStatus(repo, staleMs)
-        setView({ state, status })
+        show({ state, status })
         if (status.outdated)
           await remind("outdated", force, () =>
             context.ui.toast.show({
@@ -198,7 +203,7 @@ export default Plugin.define({
             }),
           )
       } catch {
-        setView(undefined)
+        show(undefined)
       } finally {
         running = false
         settle()
@@ -362,6 +367,8 @@ export default Plugin.define({
     void refresh()
 
     return () => {
+      disposed = true
+      setView(undefined)
       stopEvents()
       clearInterval(timer)
       clearTimeout(debounce)

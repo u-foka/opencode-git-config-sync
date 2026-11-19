@@ -16,6 +16,12 @@
     "./tui": "./src/tui.tsx"
   },
   "files": ["src", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun run test",
+    "prepublishOnly": "bun run check"
+  },
   "dependencies": {
     "@opencode/plugin": "^2.3.2"
   },
@@ -23,5 +29,13 @@
     "@opentui/core": ">=0.6.6",
     "@opentui/solid": ">=0.6.6",
     "solid-js": ">=1.9.0"
+  },
+  "devDependencies": {
+    "@opencode/theme": "2.3.2",
+    "@opentui/core": "^0.9.4",
+    "@opentui/solid": "^0.9.4",
+    "@types/bun": "^1.4.4",
+    "solid-js": "^1.9.12",
+    "typescript": "^5.9.0"
   }
 }

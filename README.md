@@ -120,6 +120,19 @@ There are several config sync tools for opencode. This one is deliberately small
 `opencode-git-config-sync` never commits or pushes without you, works with any git host, and keeps the state visible
 all the time.
 
+## Development
+
+The checks run with [bun](https://bun.sh): `bun install`, then `bun run check` (type check and tests). Without a local
+bun, `./scripts/docker.sh` runs the same in the bun image CI uses (pass a command to run something else, e.g.
+`./scripts/docker.sh bun test test/git.test.ts`).
+
+- `test/git.test.ts` drives real git repositories in a temp folder (a bare repo stands in for the remote): status,
+  submodules, sync, rebase conflicts, and setup including its undo.
+- `test/tui.test.tsx` runs the plugin against a fake opencode context and renders the sidebar and status bar with
+  opentui's test renderer, checking the text and colors, and the `/config-sync` dialogs.
+
+`npm publish` runs the checks first (`prepublishOnly`).
+
 ## License
 
 [Apache-2.0](LICENSE)

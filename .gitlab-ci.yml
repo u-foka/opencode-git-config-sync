@@ -1,0 +1,44 @@
+image: oven/bun:1.4.2
+
+stages:
+  - verify
+  - package
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+variables:
+  BUN_INSTALL_CACHE_DIR: $CI_PROJECT_DIR/.bun-cache
+
+default:
+  cache:
+    key:
+      files:
+        - bun.lock
+    paths:
+      - .bun-cache/
+  before_script:
+    - bun install --frozen-lockfile
+
+typecheck:
+  stage: verify
+  script:
+    - bun run typecheck
+
+test:
+  stage: verify
+  before_script:
+    # The tests drive real git repositories.
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq && apt-get install -y -qq git > /dev/null
+    - bun install --frozen-lockfile
+  script:
+    - bun test
+
+package:
+  stage: package
+  script:
+    - bun pm pack --dry-run
