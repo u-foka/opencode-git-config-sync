@@ -80,6 +80,49 @@ If the config folder is not a repository, the plugin suggests setup once a day.
   sidebar lists such submodules in red. `/config-sync` asks whether to ignore it and sync the rest, or cancel.
 - Per-machine settings: keep them in git-ignored files such as `*.local.json`.
 
+## Reading the status
+
+The plugin adds a compact summary to the status bar (footer) and a detail block to the session sidebar.
+Everything below uses the default `label` of `cfg`; change it with the `label` option.
+
+### Status bar (footer)
+
+Format: `<label> <signs>`, e.g. `cfg ↑1 ↓0 ●3`, `cfg ✓`, or `❗ cfg ↑2 ↓0 ●1` when outdated.
+
+| Sign | Meaning |
+| ---- | ------- |
+| `↑N` | N commits on the local branch that the remote does not have yet (to push). |
+| `↓N` | N commits on the remote that the local branch does not have yet (to pull). |
+| `●N` | N uncommitted changed files (including submodule pointer moves). |
+| `✓`  | Everything in sync: no commits to push or pull and no changed files. |
+| `❗ ` | Prefix (red) when the status is *outdated* (see below); the whole status turns red. |
+| `not synced` | Shown instead of the signs when the config folder is not a git repository. |
+
+### Sidebar
+
+Top to bottom:
+
+- `❗ OUTDATED!` (red) — shown only when outdated.
+- `Config ↑N to push · ↓N to pull` — commits to push/pull; or `Config in sync ✓` when there are none and no changed files or submodule issues.
+- `N uncommitted` — number of changed files (shown only when there are some).
+- Changed-file rows: `  <code> <path> <line counts>`, where `<code>` is git's short status (`M` modified, `A` added, `D` deleted, `??` untracked, `R` renamed, …) and the line counts are `+N −M` (or `bin` for a binary file, empty for a submodule). Rows are red when the file is a submodule that needs action, muted otherwise. A row whose submodule pointer is not pushed yet also gets a ` not pushed` suffix.
+- Submodule rows that need action but are not a change by themselves:
+  - `m ` (red) — uncommitted work inside the submodule.
+  - `↑ ` (red) — the submodule is checked out at a commit that is not on any of its remote branches (not pushed).
+  - `❗↑ ` (red) — an already-committed pointer to such an unpushed commit; the `❗` is two cells wide so the row stays aligned with the others.
+  - These rows also carry a ` not pushed` note when the pointer is unpushed.
+- `  … N more files changed` — shown when more than `maxFiles` files changed.
+- Outdated reasons are the same as for the status bar (below).
+
+### Outdated (red)
+
+A status is outdated when either of these is older than `staleHours` (default 24h):
+
+- a commit waiting to be pushed or pulled, or
+- an uncommitted file.
+
+When outdated, the status bar turns red with an `❗ ` prefix, the sidebar shows `❗ OUTDATED!`, and a toast appears once per day per machine until you dismiss it. `/config-sync-refresh` shows the warning again.
+
 ## Options
 
 ```json

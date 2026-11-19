@@ -118,7 +118,10 @@ function SidebarStatus() {
                 {status().ahead || status().behind
                   ? `↑${status().ahead} to push · ↓${status().behind} to pull`
                   : status().files.length || status().dirtySubmodules.length || status().unpushedSubmodules.length
-                    ? ""
+                    ? status().files.length === 0 &&
+                      (status().dirtySubmodules.length > 0 || status().unpushedSubmodules.length > 0)
+                      ? "needs some love ❤️"
+                      : ""
                     : "in sync ✓"}
               </text>
               <Show when={status().files.length}>
