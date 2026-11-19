@@ -14,6 +14,8 @@ variables:
   BUN_INSTALL_CACHE_DIR: $CI_PROJECT_DIR/.bun-cache
 
 default:
+  tags:
+    - docker
   cache:
     key:
       files:
