@@ -1,0 +1,27 @@
+{
+  "name": "opencode-git-config-sync",
+  "version": "0.1.0",
+  "description": "Git-native sync for your global opencode config, with a live status in the TUI sidebar and status bar",
+  "keywords": ["opencode", "opencode-plugin", "config", "sync", "git", "dotfiles"],
+  "license": "Apache-2.0",
+  "author": "Eisenberger Tamas",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/u-foka/opencode-git-config-sync.git"
+  },
+  "homepage": "https://github.com/u-foka/opencode-git-config-sync#readme",
+  "bugs": "https://github.com/u-foka/opencode-git-config-sync/issues",
+  "type": "module",
+  "exports": {
+    "./tui": "./src/tui.tsx"
+  },
+  "files": ["src", "README.md", "LICENSE"],
+  "dependencies": {
+    "@opencode/plugin": "^2.3.2"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.6.6",
+    "@opentui/solid": ">=0.6.6",
+    "solid-js": ">=1.9.0"
+  }
+}
