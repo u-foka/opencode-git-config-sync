@@ -230,12 +230,12 @@ async function ensureGitignore(repo: string) {
 export async function setupNew(repo: string, url: string, message: string) {
   if ((await repoState(repo)) !== "no-repo") throw new Error("Config directory is already a git repository")
   if (await remoteBranch(repo, url)) throw new Error("Remote is not empty; use “Pull existing config” instead")
-  await git(repo, ["init", "--quiet", "--initial-branch=main"])
+  await git(repo, ["init", "--quiet"])
   await ensureGitignore(repo)
   await git(repo, ["add", "--all"])
   await git(repo, ["commit", "--quiet", "-m", message])
   await git(repo, ["remote", "add", "origin", url])
-  await git(repo, ["push", "--quiet", "-u", "origin", "main"])
+  await git(repo, ["push", "--quiet", "-u", "origin", "HEAD"])
 }
 
 /** Another machine: adopt the remote config, moving clashing local files to a backup folder first. */
