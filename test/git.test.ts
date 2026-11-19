@@ -100,7 +100,7 @@ describe("readStatus", () => {
       env: { ...process.env, GIT_COMMITTER_DATE: "2020-01-01T00:00:00Z", GIT_AUTHOR_DATE: "2020-01-01T00:00:00Z" },
     })
     write(join(repo, "b.md"), "b\n")
-    execFileSync("touch", ["-d", "2020-01-01", join(repo, "b.md")])
+    execFileSync("touch", ["-t", "202001010000", join(repo, "b.md")])
 
     const status = await readStatus(repo, DAY_MS)
     expect(status.outdated).toBe(true)

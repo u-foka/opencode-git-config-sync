@@ -188,7 +188,7 @@ describe("sidebar", () => {
   test("warns in red when outdated", async () => {
     const { repo } = syncedRepo()
     write(join(repo, "old.md"), "x\n")
-    execFileSync("touch", ["-d", "2020-01-01", join(repo, "old.md")])
+    execFileSync("touch", ["-t", "202001010000", join(repo, "old.md")])
 
     const { render, toasts } = await start(repo)
     const sidebar = await render("sidebar.content")
@@ -223,7 +223,7 @@ describe("footer", () => {
   test("is red with ❗ when outdated", async () => {
     const { repo } = syncedRepo()
     write(join(repo, "old.md"), "x\n")
-    execFileSync("touch", ["-d", "2020-01-01", join(repo, "old.md")])
+    execFileSync("touch", ["-t", "202001010000", join(repo, "old.md")])
     const { render } = await start(repo)
     const footer = await render("prompt.footer.status")
     expect(await settle(footer, "❗ cfg")).toContain("❗ cfg ●1")
