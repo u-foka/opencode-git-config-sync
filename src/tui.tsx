@@ -10,6 +10,7 @@ import {
   setupNew,
   stageAll,
   sync,
+  unpushedMessage,
   type ChangedFile,
   type RepoState,
   type SyncStatus,
@@ -44,20 +45,29 @@ const lineCounts = (file: ChangedFile) =>
 
 interface Row {
   readonly text: string
-  readonly dirty: boolean
+  /** Needs action before it syncs: uncommitted work inside a submodule, or submodule commits that are not pushed. */
+  readonly warn: boolean
 }
 
-// Committable changes first, then submodules whose only change is uncommitted work inside them ("m", as in git's
-// short status). Any submodule with work inside is red: that work won't be synced.
+// Committable changes first, then submodules that need action but are not a change themselves: "m" (as in git's short
+// status) for uncommitted work inside, "↑" for an already committed pointer whose commits are not pushed.
 function rows(status: SyncStatus): Row[] {
   const dirty = new Set(status.dirtySubmodules)
+  const unpushed = new Set(status.unpushedSubmodules)
   const listed = new Set(status.files.map((file) => file.path))
+  const note = (path: string) => (unpushed.has(path) ? " not pushed" : "")
+  const extra = [...new Set([...status.dirtySubmodules, ...status.unpushedSubmodules])].filter((path) => !listed.has(path))
   return [
     ...status.files.map((file) => ({
-      text: `  ${file.code.padEnd(2)} ${file.path} ${lineCounts(file)}`.trimEnd(),
-      dirty: dirty.has(file.path),
+      text: `  ${file.code.padEnd(2)} ${file.path} ${lineCounts(file)}`.trimEnd() + note(file.path),
+      warn: dirty.has(file.path) || unpushed.has(file.path),
     })),
-    ...status.dirtySubmodules.filter((path) => !listed.has(path)).map((path) => ({ text: `  m  ${path}`, dirty: true })),
+    // A committed pointer to an unpushed commit is one push away from breaking the submodule update on the other
+    // machines. ❗ is two cells wide and replaces the indent, so the row stays aligned with the others.
+    ...extra.map((path) => ({
+      text: `${unpushed.has(path) ? "❗" : "  "}${dirty.has(path) ? "m " : "↑ "} ${path}${note(path)}`,
+      warn: true,
+    })),
   ]
 }
 
@@ -107,7 +117,7 @@ function SidebarStatus() {
                 {"Config "}
                 {status().ahead || status().behind
                   ? `↑${status().ahead} to push · ↓${status().behind} to pull`
-                  : status().files.length || status().dirtySubmodules.length
+                  : status().files.length || status().dirtySubmodules.length || status().unpushedSubmodules.length
                     ? ""
                     : "in sync ✓"}
               </text>
@@ -116,7 +126,7 @@ function SidebarStatus() {
               </Show>
               <For each={shown()}>
                 {(row) => (
-                  <text fg={row.dirty ? context.theme.text.feedback.error.base : context.theme.text.muted}>{row.text}</text>
+                  <text fg={row.warn ? context.theme.text.feedback.error.base : context.theme.text.muted}>{row.text}</text>
                 )}
               </For>
               <Show when={more() > 0}>
@@ -240,6 +250,9 @@ export default Plugin.define({
         try {
           if ((await repoState(repo)) === "no-repo") return void (await runSetup())
           const status = await readStatus(repo, staleMs)
+          // Checked before any dialog or staging. Pushing such a pointer would break the submodule update on every
+          // other machine (and the push refuses it anyway).
+          if (status.unpushedSubmodules.length) return failed("Config sync stopped", new Error(unpushedMessage(status.unpushedSubmodules)))
           if (status.dirtySubmodules.length) {
             const proceed = await context.ui.dialog.select({
               title: "Submodules have uncommitted work",

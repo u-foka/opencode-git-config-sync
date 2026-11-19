@@ -40,7 +40,15 @@ describe("repoState", () => {
 describe("readStatus", () => {
   test("a synced repo has nothing to report", async () => {
     const status = await readStatus(syncedRepo().repo, DAY_MS)
-    expect(status).toEqual({ ahead: 0, behind: 0, files: [], dirtySubmodules: [], outdated: false, reasons: [] })
+    expect(status).toEqual({
+      ahead: 0,
+      behind: 0,
+      files: [],
+      dirtySubmodules: [],
+      unpushedSubmodules: [],
+      outdated: false,
+      reasons: [],
+    })
   })
 
   test("lists staged, unstaged and untracked changes together, with line counts", async () => {
@@ -125,6 +133,28 @@ describe("readStatus with submodules", () => {
     const status = await readStatus(repo, DAY_MS)
     expect(status.files).toEqual([{ code: "M", path: "plugins/x", added: undefined, removed: undefined, submodule: true }])
     expect(status.dirtySubmodules).toEqual([])
+    expect(status.unpushedSubmodules).toEqual(["plugins/x"])
+  })
+
+  test("a moved submodule is no longer unpushed once its commit is pushed", async () => {
+    const { dir, repo } = syncedRepo()
+    const sub = withSubmodule(dir, repo)
+    run(sub, "commit", "-q", "--allow-empty", "-m", "bump")
+    run(sub, "push", "-q")
+
+    const status = await readStatus(repo, DAY_MS)
+    expect(status.files.map((file) => file.path)).toEqual(["plugins/x"])
+    expect(status.unpushedSubmodules).toEqual([])
+  })
+
+  test("an already committed pointer to an unpushed commit is still unpushed", async () => {
+    const { dir, repo } = syncedRepo()
+    const sub = withSubmodule(dir, repo)
+    run(sub, "commit", "-q", "--allow-empty", "-m", "bump")
+    run(repo, "commit", "-qam", "bump x")
+
+    const status = await readStatus(repo, DAY_MS)
+    expect(status).toMatchObject({ ahead: 1, files: [], unpushedSubmodules: ["plugins/x"] })
   })
 
   test("a moved submodule with work inside is both a change and dirty", async () => {
@@ -231,13 +261,18 @@ describe("sync", () => {
     expect(readFileSync(join(sub, "draft.ts"), "utf8")).toBe("wip\n")
   })
 
-  test("refuses to push a submodule pointer that is not on the submodule's remote", async () => {
+  test("stops before committing when a submodule commit is not pushed", async () => {
     const { dir, remote, repo } = syncedRepo()
     const sub = withSubmodule(dir, repo)
     run(sub, "commit", "-q", "--allow-empty", "-m", "not pushed")
     await stageAll(repo)
 
-    await expect(sync(repo, "bump x", () => {})).rejects.toThrow(/plugins\/x/)
+    const steps: string[] = []
+    await expect(sync(repo, "bump x", (step) => steps.push(step))).rejects.toThrow(
+      "plugins/x has commits that are not pushed; push the submodule first",
+    )
+    expect(steps).toEqual([])
+    expect(run(repo, "log", "-1", "--format=%s").trim()).toBe("add submodule")
     expect(run(remote, "log", "-1", "--format=%s").trim()).toBe("add submodule")
   })
 

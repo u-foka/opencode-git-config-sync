@@ -70,8 +70,12 @@ If the config folder is not a repository, the plugin suggests setup once a day.
 - It runs `git fetch` at most once per 24h. It never pulls or pushes on its own.
 - Submodules are updated (`git submodule update --init --recursive`) after a pull.
 - A submodule that moved to a new commit counts as a change: `/config-sync` commits the new pointer like any other
-  file. The push uses `--recurse-submodules=check`, so it refuses to publish a pointer whose commit is not on the
-  submodule's remote yet; push the submodule first.
+  file.
+- A submodule checked out at a commit that is not on its remote yet is red and marked `not pushed`, and `/config-sync`
+  refuses to run until you push the submodule: once that pointer is pushed, the submodule update fails on your other
+  machines. If the pointer is already committed in the config repo, the sidebar adds a `❗↑ <path> not pushed` row for it.
+  (The push itself also uses `--recurse-submodules=check` as a last line of defense.) Detection uses the submodule's
+  remote-tracking branches without fetching, so a commit someone else pushed shows as unpushed until you fetch there.
 - Uncommitted work inside a submodule is never committed or pushed, and does not count as an uncommitted file; the
   sidebar lists such submodules in red. `/config-sync` asks whether to ignore it and sync the rest, or cancel.
 - Per-machine settings: keep them in git-ignored files such as `*.local.json`.

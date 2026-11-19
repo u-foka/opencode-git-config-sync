@@ -17,6 +17,8 @@ export interface SyncStatus {
   readonly files: readonly ChangedFile[]
   /** Submodules with uncommitted work inside; that work is never committed by the config repo. */
   readonly dirtySubmodules: readonly string[]
+  /** Submodules checked out at a commit that is on none of their remote branches; pushing the config repo would fail. */
+  readonly unpushedSubmodules: readonly string[]
   readonly outdated: boolean
   readonly reasons: readonly string[]
 }
@@ -172,11 +174,30 @@ export async function readStatus(repo: string, staleMs: number): Promise<SyncSta
   if (behind && (await oldestCommitAge(repo, "HEAD..@{u}")) > staleMs) reasons.push(`${behind} to pull for over ${hours}h`)
 
   const { files, dirtySubmodules } = await changedFiles(repo)
+  const unpushed = await unpushedSubmodules(repo)
   const ages = await Promise.all(files.map((file) => age(join(repo, file.path))))
   const stale = ages.filter((value) => value !== undefined && value > staleMs).length
   if (stale) reasons.push(`${stale} uncommitted file${stale === 1 ? "" : "s"} older than ${hours}h`)
 
-  return { ahead, behind, files, dirtySubmodules, outdated: reasons.length > 0, reasons }
+  return { ahead, behind, files, dirtySubmodules, unpushedSubmodules: unpushed, outdated: reasons.length > 0, reasons }
+}
+
+export const unpushedMessage = (paths: readonly string[]) =>
+  `${paths.join(", ")} ${paths.length === 1 ? "has" : "have"} commits that are not pushed; push the submodule first`
+
+// Uses the submodules' remote-tracking refs, without fetching: pushing from a submodule updates them right away.
+export async function unpushedSubmodules(repo: string): Promise<string[]> {
+  const entries = (await git(repo, ["ls-files", "--stage", "-z"])).split("\0").filter((entry) => entry.startsWith("160000 "))
+  const paths = entries.map((entry) => entry.slice(entry.indexOf("\t") + 1))
+  const unpushed = await Promise.all(
+    paths.map(async (path) => {
+      const sub = join(repo, path)
+      if (!(await exists(join(sub, ".git")))) return false
+      const remote = await git(sub, ["branch", "--remotes", "--contains", "HEAD"]).catch(() => "")
+      return remote.trim() === ""
+    }),
+  )
+  return paths.filter((_, index) => unpushed[index])
 }
 
 export function proposeMessage(files: readonly ChangedFile[]): string {
@@ -212,6 +233,8 @@ export async function stageAll(repo: string) {
 
 export async function sync(repo: string, message: string | undefined, onStep: (step: SyncStep) => void) {
   if ((await repoState(repo)) !== "ready") throw new Error("Config repo is not set up; run /config-sync-setup")
+  const unpushed = await unpushedSubmodules(repo)
+  if (unpushed.length) throw new Error(unpushedMessage(unpushed))
   if (message !== undefined) {
     onStep("commit")
     await git(repo, ["commit", "--quiet", "-m", message])

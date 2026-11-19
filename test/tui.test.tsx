@@ -139,12 +139,38 @@ describe("sidebar", () => {
     const { dir, repo } = syncedRepo()
     const sub = withSubmodule(dir, repo)
     run(sub, "commit", "-q", "--allow-empty", "-m", "bump")
+    run(sub, "push", "-q")
 
     const { render } = await start(repo)
     const sidebar = await render("sidebar.content")
     const frame = await settle(sidebar, "M  plugins/x")
-    expect(frame).toMatch(/M {2}plugins\/x\s*$/m)
+    expect(frame).toMatch(/^ {2}M {2}plugins\/x\s*$/m)
     expect(colorOf(sidebar, "plugins/x")).toBe("muted")
+  })
+
+  test("flags a moved submodule whose commit is not pushed", async () => {
+    const { dir, repo } = syncedRepo()
+    const sub = withSubmodule(dir, repo)
+    run(sub, "commit", "-q", "--allow-empty", "-m", "bump")
+
+    const { render } = await start(repo)
+    const sidebar = await render("sidebar.content")
+    expect(await settle(sidebar, "not pushed")).toMatch(/^ {2}M {2}plugins\/x not pushed\s*$/m)
+    expect(colorOf(sidebar, "plugins/x")).toBe("error")
+  })
+
+  test("adds a row for an already committed pointer whose commit is not pushed", async () => {
+    const { dir, repo } = syncedRepo()
+    const sub = withSubmodule(dir, repo)
+    run(sub, "commit", "-q", "--allow-empty", "-m", "bump")
+    run(repo, "commit", "-qam", "bump x")
+
+    const { render } = await start(repo)
+    const sidebar = await render("sidebar.content")
+    const frame = await settle(sidebar, "not pushed")
+    expect(frame).toMatch(/^❗↑ {2}plugins\/x not pushed\s*$/m)
+    expect(frame).not.toContain("uncommitted")
+    expect(colorOf(sidebar, "plugins/x")).toBe("error")
   })
 
   test("limits the list to maxFiles", async () => {
@@ -256,6 +282,24 @@ describe("/config-sync", () => {
 
     await command("config-sync.sync")
     expect(run(remote, "log", "-1", "--format=%s").trim()).toBe("add a")
+  })
+
+  test("is blocked by unpushed submodule commits, before any dialog", async () => {
+    const { dir, repo, remote } = syncedRepo()
+    const sub = withSubmodule(dir, repo)
+    run(sub, "commit", "-q", "--allow-empty", "-m", "bump")
+    write(join(repo, "a.md"), "x\n")
+    const { command, prompts, toasts } = await start(repo, {}, ["message"])
+
+    await command("config-sync.sync")
+    expect(prompts).toEqual([])
+    expect(run(repo, "diff", "--cached", "--name-only").trim()).toBe("")
+    expect(run(remote, "log", "-1", "--format=%s").trim()).toBe("add submodule")
+    expect(toasts.at(-1)).toMatchObject({
+      title: "Config sync stopped",
+      variant: "error",
+      message: "plugins/x has commits that are not pushed; push the submodule first (click to dismiss)",
+    })
   })
 
   test("says so when a sync is already running", async () => {
