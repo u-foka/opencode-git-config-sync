@@ -44,7 +44,7 @@ HTTPS). The plugin never asks for passwords; git fails with an error instead.
 
 | Command                | What it does                                                                             |
 | ---------------------- | ---------------------------------------------------------------------------------------- |
-| `/config-sync`         | Commit all changes (asks for a message, with a proposed one), pull --rebase, push.        |
+| `/config-sync`         | Stage all changes, commit (asks for a message, with a proposed one), pull --rebase, push. Cancelling leaves the changes staged. |
 | `/config-sync-refresh` | Refresh the status now, and show the outdated warning again if it applies.               |
 | `/config-sync-setup`   | Set up the config folder: **Start new** or **Pull existing config**.                     |
 
@@ -58,6 +58,9 @@ All of them are also in the command palette under **Config sync**.
   also has (there will be some, at least `cli.json`) are moved to `.config-sync-backup-<date>/` first, so you can merge
   anything you want to keep. The backup folder is ignored by git.
 
+If a setup step fails (wrong URL, missing credentials, push rejected, checkout conflict), the setup is undone: the new
+`.git` is removed, and the `.gitignore` or the backed-up files are restored, so you can simply run it again.
+
 If the config folder is not a repository, the plugin suggests setup once a day.
 
 ## How it works
@@ -65,9 +68,12 @@ If the config folder is not a repository, the plugin suggests setup once a day.
 - The status refreshes when files in the config folder change (recursive file watcher), after every model turn, and
   every 5 minutes.
 - It runs `git fetch` at most once per 24h. It never pulls or pushes on its own.
-- Submodules are updated (`git submodule update --init --recursive`) after a pull. They are never committed or pushed;
-  the push uses `--recurse-submodules=check`, so it refuses to publish a submodule pointer whose commit is not on the
-  submodule's remote yet.
+- Submodules are updated (`git submodule update --init --recursive`) after a pull.
+- A submodule that moved to a new commit counts as a change: `/config-sync` commits the new pointer like any other
+  file. The push uses `--recurse-submodules=check`, so it refuses to publish a pointer whose commit is not on the
+  submodule's remote yet; push the submodule first.
+- Uncommitted work inside a submodule is never committed or pushed, and does not count as an uncommitted file; the
+  sidebar lists such submodules in red. `/config-sync` asks whether to ignore it and sync the rest, or cancel.
 - Per-machine settings: keep them in git-ignored files such as `*.local.json`.
 
 ## Options

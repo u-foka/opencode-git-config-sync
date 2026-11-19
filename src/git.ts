@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { appendFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -8,12 +8,15 @@ export interface ChangedFile {
   readonly path: string
   readonly added: number | undefined
   readonly removed: number | undefined
+  readonly submodule: boolean
 }
 
 export interface SyncStatus {
   readonly ahead: number
   readonly behind: number
   readonly files: readonly ChangedFile[]
+  /** Submodules with uncommitted work inside; that work is never committed by the config repo. */
+  readonly dirtySubmodules: readonly string[]
   readonly outdated: boolean
   readonly reasons: readonly string[]
 }
@@ -110,16 +113,31 @@ async function countLines(path: string) {
   }
 }
 
-async function changedFiles(repo: string): Promise<ChangedFile[]> {
-  const status = await git(repo, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+// Porcelain v2 tells a moved submodule pointer (committable) apart from uncommitted work inside a submodule (not).
+async function changedFiles(repo: string): Promise<{ files: ChangedFile[]; dirtySubmodules: string[] }> {
+  const status = await git(repo, ["status", "--porcelain=v2", "-z", "--untracked-files=all"])
   const entries = status.split("\0")
-  const files: { code: string; path: string }[] = []
+  const files: { code: string; path: string; submodule: boolean }[] = []
+  const dirtySubmodules: string[] = []
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]
     if (!entry) continue
-    const code = entry.slice(0, 2)
-    files.push({ code: code.trim() || code, path: entry.slice(3) })
-    if (code.includes("R") || code.includes("C")) i++
+    const kind = entry[0]
+    if (kind === "?") {
+      files.push({ code: "??", path: entry.slice(2), submodule: false })
+      continue
+    }
+    if (kind !== "1" && kind !== "2" && kind !== "u") continue
+    const fields = entry.split(" ")
+    const pathIndex = kind === "1" ? 8 : kind === "2" ? 9 : 10
+    const path = fields.slice(pathIndex).join(" ")
+    const xy = fields[1]
+    const sub = fields[2]
+    if (kind === "2") i++
+    if (sub.startsWith("S") && (sub[2] === "M" || sub[3] === "U")) dirtySubmodules.push(path)
+    if (sub.startsWith("S") && sub[1] !== "C" && xy === ".M") continue
+    const code = xy.replaceAll(".", " ")
+    files.push({ code: code.trim() || code, path, submodule: sub.startsWith("S") })
   }
 
   const numstat = new Map<string, [number | undefined, number | undefined]>()
@@ -132,13 +150,15 @@ async function changedFiles(repo: string): Promise<ChangedFile[]> {
     }
   }
 
-  return Promise.all(
-    files.map(async ({ code, path }) => {
-      if (code === "??") return { code, path, added: await countLines(join(repo, path)), removed: 0 }
+  const counted = await Promise.all(
+    files.map(async ({ code, path, submodule }) => {
+      if (submodule) return { code, path, added: undefined, removed: undefined, submodule }
+      if (code === "??") return { code, path, added: await countLines(join(repo, path)), removed: 0, submodule }
       const [added, removed] = numstat.get(path) ?? [undefined, undefined]
-      return { code, path, added, removed }
+      return { code, path, added, removed, submodule }
     }),
   )
+  return { files: counted, dirtySubmodules }
 }
 
 export async function readStatus(repo: string, staleMs: number): Promise<SyncStatus> {
@@ -151,12 +171,12 @@ export async function readStatus(repo: string, staleMs: number): Promise<SyncSta
   if (ahead && (await oldestCommitAge(repo, "@{u}..HEAD")) > staleMs) reasons.push(`${ahead} to push for over ${hours}h`)
   if (behind && (await oldestCommitAge(repo, "HEAD..@{u}")) > staleMs) reasons.push(`${behind} to pull for over ${hours}h`)
 
-  const files = await changedFiles(repo)
+  const { files, dirtySubmodules } = await changedFiles(repo)
   const ages = await Promise.all(files.map((file) => age(join(repo, file.path))))
   const stale = ages.filter((value) => value !== undefined && value > staleMs).length
   if (stale) reasons.push(`${stale} uncommitted file${stale === 1 ? "" : "s"} older than ${hours}h`)
 
-  return { ahead, behind, files, outdated: reasons.length > 0, reasons }
+  return { ahead, behind, files, dirtySubmodules, outdated: reasons.length > 0, reasons }
 }
 
 export function proposeMessage(files: readonly ChangedFile[]): string {
@@ -177,18 +197,23 @@ export function proposeMessage(files: readonly ChangedFile[]): string {
   return phrases.join("; ") || "config updates"
 }
 
-// Submodules are only checked out to the commit the config repo records; they are never committed or pushed.
+// Submodules are checked out to the commit the config repo records. A moved submodule pointer is committed like any
+// other change, but work inside a submodule is never committed or pushed.
 async function updateSubmodules(repo: string) {
   if (!(await exists(join(repo, ".gitmodules")))) return
   await git(repo, ["submodule", "sync", "--recursive", "--quiet"])
   await git(repo, ["submodule", "update", "--init", "--recursive", "--quiet"])
 }
 
+/** Stage everything, so the commit contains exactly what the commit prompt listed. */
+export async function stageAll(repo: string) {
+  await git(repo, ["add", "--all"])
+}
+
 export async function sync(repo: string, message: string | undefined, onStep: (step: SyncStep) => void) {
   if ((await repoState(repo)) !== "ready") throw new Error("Config repo is not set up; run /config-sync-setup")
   if (message !== undefined) {
     onStep("commit")
-    await git(repo, ["add", "--all"])
     await git(repo, ["commit", "--quiet", "-m", message])
   }
   onStep("pull")
@@ -226,16 +251,36 @@ async function ensureGitignore(repo: string) {
   if (missing.length) await appendFile(path, `${current.endsWith("\n") ? "" : "\n"}${missing.join("\n")}\n`)
 }
 
+// Setup steps run only when the config dir is not a repository, so on failure the `.git` there is ours to delete.
+async function undoSetup(repo: string, error: unknown, undo: () => Promise<void>): Promise<never> {
+  const message = (error as Error).message
+  try {
+    await undo()
+    await rm(join(repo, ".git"), { recursive: true, force: true })
+  } catch (undoError) {
+    throw new Error(`${message} (undoing the setup also failed: ${(undoError as Error).message})`)
+  }
+  throw new Error(`${message} (setup undone, the config folder is as before)`)
+}
+
 /** First machine: turn the config dir into a repo and push it to an empty remote. */
 export async function setupNew(repo: string, url: string, message: string) {
   if ((await repoState(repo)) !== "no-repo") throw new Error("Config directory is already a git repository")
   if (await remoteBranch(repo, url)) throw new Error("Remote is not empty; use “Pull existing config” instead")
-  await git(repo, ["init", "--quiet"])
-  await ensureGitignore(repo)
-  await git(repo, ["add", "--all"])
-  await git(repo, ["commit", "--quiet", "-m", message])
-  await git(repo, ["remote", "add", "origin", url])
-  await git(repo, ["push", "--quiet", "-u", "origin", "HEAD"])
+  const gitignore = join(repo, ".gitignore")
+  const originalGitignore = await readFile(gitignore, "utf8").catch(() => undefined)
+  try {
+    await git(repo, ["init", "--quiet"])
+    await ensureGitignore(repo)
+    await git(repo, ["add", "--all"])
+    await git(repo, ["commit", "--quiet", "-m", message])
+    await git(repo, ["remote", "add", "origin", url])
+    await git(repo, ["push", "--quiet", "-u", "origin", "HEAD"])
+  } catch (error) {
+    await undoSetup(repo, error, () =>
+      originalGitignore === undefined ? rm(gitignore, { force: true }) : writeFile(gitignore, originalGitignore),
+    )
+  }
 }
 
 /** Another machine: adopt the remote config, moving clashing local files to a backup folder first. */
@@ -243,28 +288,44 @@ export async function setupExisting(repo: string, url: string): Promise<{ backup
   if ((await repoState(repo)) !== "no-repo") throw new Error("Config directory is already a git repository")
   const branch = await remoteBranch(repo, url)
   if (!branch) throw new Error("Remote is empty; use “Start new” instead")
-  await git(repo, ["init", "--quiet", `--initial-branch=${branch}`])
-  await git(repo, ["remote", "add", "origin", url])
-  await git(repo, ["fetch", "--quiet", "origin"])
-
-  const remoteFiles = (await git(repo, ["ls-tree", "-r", "-z", "--name-only", `origin/${branch}`])).split("\0").filter(Boolean)
-  const clashing: string[] = []
-  for (const path of remoteFiles) if (await exists(join(repo, path))) clashing.push(path)
 
   let backup: string | undefined
-  if (clashing.length) {
-    backup = `.config-sync-backup-${new Date().toISOString().replace(/[:.]/g, "-")}`
-    const gitDir = (await git(repo, ["rev-parse", "--absolute-git-dir"])).trim()
-    await mkdir(join(gitDir, "info"), { recursive: true })
-    await appendFile(join(gitDir, "info", "exclude"), "\n.config-sync-backup-*/\n")
-    for (const path of clashing) {
-      const target = join(repo, backup, path)
-      await mkdir(dirname(target), { recursive: true })
-      await rename(join(repo, path), target)
+  const moved: string[] = []
+  try {
+    await git(repo, ["init", "--quiet", `--initial-branch=${branch}`])
+    await git(repo, ["remote", "add", "origin", url])
+    await git(repo, ["fetch", "--quiet", "origin"])
+
+    const remoteFiles = (await git(repo, ["ls-tree", "-r", "-z", "--name-only", `origin/${branch}`])).split("\0").filter(Boolean)
+    const clashing: string[] = []
+    for (const path of remoteFiles) if (await exists(join(repo, path))) clashing.push(path)
+
+    if (clashing.length) {
+      backup = `.config-sync-backup-${new Date().toISOString().replace(/[:.]/g, "-")}`
+      const gitDir = (await git(repo, ["rev-parse", "--absolute-git-dir"])).trim()
+      await mkdir(join(gitDir, "info"), { recursive: true })
+      await appendFile(join(gitDir, "info", "exclude"), "\n.config-sync-backup-*/\n")
+      for (const path of clashing) {
+        const target = join(repo, backup, path)
+        await mkdir(dirname(target), { recursive: true })
+        await rename(join(repo, path), target)
+        moved.push(path)
+      }
     }
+
+    await git(repo, ["checkout", "--quiet", "-B", branch, "--track", `origin/${branch}`])
+  } catch (error) {
+    await undoSetup(repo, error, async () => {
+      if (!backup) return
+      for (const path of moved) {
+        await rm(join(repo, path), { recursive: true, force: true })
+        await rename(join(repo, backup, path), join(repo, path))
+      }
+      await rm(join(repo, backup), { recursive: true, force: true })
+    })
   }
 
-  await git(repo, ["checkout", "--quiet", "-B", branch, "--track", `origin/${branch}`])
+  // The checkout succeeded, so the repo is usable; a failed submodule update is retried by the next /config-sync.
   await updateSubmodules(repo)
-  return { backup, moved: clashing }
+  return { backup, moved }
 }

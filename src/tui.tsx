@@ -8,6 +8,7 @@ import {
   repoState,
   setupExisting,
   setupNew,
+  stageAll,
   sync,
   type ChangedFile,
   type RepoState,
@@ -36,8 +37,29 @@ const [settings, setSettings] = createSignal({ maxFiles: 3, label: "cfg" })
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`
 
 const lineCounts = (file: ChangedFile) =>
-  [file.added ? `+${file.added}` : "", file.removed ? `−${file.removed}` : ""].filter(Boolean).join(" ") ||
-  (file.added === undefined ? "bin" : "")
+  file.submodule
+    ? ""
+    : [file.added ? `+${file.added}` : "", file.removed ? `−${file.removed}` : ""].filter(Boolean).join(" ") ||
+      (file.added === undefined ? "bin" : "")
+
+interface Row {
+  readonly text: string
+  readonly dirty: boolean
+}
+
+// Committable changes first, then submodules whose only change is uncommitted work inside them ("m", as in git's
+// short status). Any submodule with work inside is red: that work won't be synced.
+function rows(status: SyncStatus): Row[] {
+  const dirty = new Set(status.dirtySubmodules)
+  const listed = new Set(status.files.map((file) => file.path))
+  return [
+    ...status.files.map((file) => ({
+      text: `  ${file.code.padEnd(2)} ${file.path} ${lineCounts(file)}`.trimEnd(),
+      dirty: dirty.has(file.path),
+    })),
+    ...status.dirtySubmodules.filter((path) => !listed.has(path)).map((path) => ({ text: `  m  ${path}`, dirty: true })),
+  ]
+}
 
 function summary(status: SyncStatus) {
   const parts = [
@@ -55,7 +77,7 @@ function FooterStatus() {
     <Switch>
       <Match when={view()?.state === "ready" && (view() as { status: SyncStatus }).status}>
         {(status) => (
-          <text fg={status().outdated ? context.theme.text.feedback.error : context.theme.text.muted}>
+          <text fg={status().outdated ? context.theme.text.feedback.error.base : context.theme.text.muted}>
             {(status().outdated ? "❗ " : "") + summary(status())}
           </text>
         )}
@@ -73,18 +95,19 @@ function SidebarStatus() {
     <Switch>
       <Match when={view()?.state === "ready" && (view() as { status: SyncStatus }).status}>
         {(status) => {
-          const shown = () => status().files.slice(0, settings().maxFiles)
-          const more = () => status().files.length - shown().length
+          const all = () => rows(status())
+          const shown = () => all().slice(0, settings().maxFiles)
+          const more = () => all().length - shown().length
           return (
             <box flexDirection="column">
               <Show when={status().outdated}>
-                <text fg={context.theme.text.feedback.error}>❗ OUTDATED!</text>
+                <text fg={context.theme.text.feedback.error.base}>❗ OUTDATED!</text>
               </Show>
               <text fg={context.theme.text.base}>
                 {"Config "}
                 {status().ahead || status().behind
                   ? `↑${status().ahead} to push · ↓${status().behind} to pull`
-                  : status().files.length
+                  : status().files.length || status().dirtySubmodules.length
                     ? ""
                     : "in sync ✓"}
               </text>
@@ -92,8 +115,8 @@ function SidebarStatus() {
                 <text fg={context.theme.text.muted}>{`${status().files.length} uncommitted`}</text>
               </Show>
               <For each={shown()}>
-                {(file) => (
-                  <text fg={context.theme.text.muted}>{`  ${file.code.padEnd(2)} ${file.path} ${lineCounts(file)}`}</text>
+                {(row) => (
+                  <text fg={row.dirty ? context.theme.text.feedback.error.base : context.theme.text.muted}>{row.text}</text>
                 )}
               </For>
               <Show when={more() > 0}>
@@ -127,6 +150,7 @@ export default Plugin.define({
     let running = false
     let pending = false
     let busy = false
+    let idle = Promise.resolve()
 
     const remind = async (kind: "outdated" | "setup", force: boolean, show: () => void) => {
       if (!force && Date.now() - reminders[kind] < staleMs) return
@@ -136,12 +160,17 @@ export default Plugin.define({
       show()
     }
 
+    // Refreshes are skipped while a sync or setup runs (and those wait for an in-flight one), so a refresh's
+    // `git fetch` can't race the pull for ref locks. `exclusive` refreshes once its task finishes.
     const refresh = async (force = false) => {
+      if (busy) return
       if (running) {
         pending = true
         return
       }
       running = true
+      let settle = () => {}
+      idle = new Promise((resolve) => (settle = resolve))
       try {
         const state = await repoState(repo)
         if (state !== "ready") {
@@ -172,6 +201,7 @@ export default Plugin.define({
         setView(undefined)
       } finally {
         running = false
+        settle()
         if (pending) {
           pending = false
           void refresh()
@@ -188,9 +218,11 @@ export default Plugin.define({
       })
 
     const exclusive = async (task: () => Promise<void>) => {
-      if (busy) return
+      if (busy) return context.ui.toast.show({ message: "Config sync is already running", variant: "info" })
       busy = true
+      pending = false
       try {
+        await idle
         await task()
       } finally {
         busy = false
@@ -203,16 +235,33 @@ export default Plugin.define({
         try {
           if ((await repoState(repo)) === "no-repo") return void (await runSetup())
           const status = await readStatus(repo, staleMs)
+          if (status.dirtySubmodules.length) {
+            const proceed = await context.ui.dialog.select({
+              title: "Submodules have uncommitted work",
+              options: [
+                {
+                  title: "Ignore and sync the rest",
+                  value: "ignore",
+                  description: `Leaves the work in ${status.dirtySubmodules.join(", ")} uncommitted`,
+                },
+                { title: "Cancel", value: "cancel", description: "Commit or discard the submodule work first" },
+              ],
+            })
+            if (proceed !== "ignore") return context.ui.toast.show({ message: "Config sync cancelled", variant: "info" })
+          }
           let message: string | undefined
           if (status.files.length) {
+            await stageAll(repo)
+            const staged = await readStatus(repo, staleMs)
             message = (
               await context.ui.dialog.prompt({
                 title: "Commit config changes",
-                description: `${plural(status.files.length, "uncommitted file")}; all will be committed.`,
-                value: proposeMessage(status.files),
+                description: `${plural(staged.files.length, "staged file")} will be committed.`,
+                value: proposeMessage(staged.files),
               })
             )?.trim()
-            if (!message) return context.ui.toast.show({ message: "Config sync cancelled", variant: "info" })
+            if (!message)
+              return context.ui.toast.show({ message: "Config sync cancelled; the changes stay staged", variant: "info" })
           }
           await sync(repo, message, (step) =>
             context.ui.toast.show({ message: `Config sync: ${step}…`, variant: "info", duration: 2000 }),

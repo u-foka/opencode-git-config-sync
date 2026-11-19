@@ -4,7 +4,7 @@
   "description": "Git-native sync for your global opencode config, with a live status in the TUI sidebar and status bar",
   "keywords": ["opencode", "opencode-plugin", "config", "sync", "git", "dotfiles"],
   "license": "Apache-2.0",
-  "author": "Eisenberger Tamas",
+  "author": "Eisenberger Tamas <e.tamas@iwstudio.hu>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/u-foka/opencode-git-config-sync.git"
