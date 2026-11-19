@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { watch, type FSWatcher } from "node:fs"
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { createSignal, For, Match, Show, Switch } from "solid-js"
