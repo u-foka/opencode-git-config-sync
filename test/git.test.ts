@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } f
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { DAY_MS, fresh, otherMachine, run, syncedRepo, withSubmodule, write, useScratchRepos } from "./helpers"
-import { configDir, proposeMessage, readStatus, repoState, setupExisting, setupNew, stageAll, sync, type ChangedFile } from "../src/git"
+import { configDir, git, proposeMessage, readStatus, repoState, setupExisting, setupNew, stageAll, sync, type ChangedFile } from "../src/git"
 
 useScratchRepos()
 
@@ -111,6 +111,33 @@ describe("readStatus", () => {
     const { repo } = syncedRepo()
     write(join(repo, "a.md"), "a\n")
     expect((await readStatus(repo, DAY_MS)).outdated).toBe(false)
+  })
+})
+
+describe("background fetch", () => {
+  // A fake ssh that records its arguments, then waits as if prompting.
+  function fakeSsh(dir: string, sleep: number) {
+    const script = join(dir, "fake-ssh")
+    write(script, `#!/bin/sh\necho "$@" >> "${join(dir, "ssh-args")}"\nsleep ${sleep}\nexit 1\n`)
+    chmodSync(script, 0o755)
+    return script
+  }
+
+  test("runs ssh in batch mode, keeping the configured ssh command", async () => {
+    const { dir, repo } = syncedRepo()
+    run(repo, "remote", "set-url", "origin", "ssh://example.invalid/x.git")
+    run(repo, "config", "core.sshCommand", fakeSsh(dir, 0))
+    await readStatus(repo, 0)
+    expect(readFileSync(join(dir, "ssh-args"), "utf8")).toContain("-o BatchMode=yes")
+  })
+
+  test("a hanging git command is stopped by the timeout", async () => {
+    const { dir, repo } = syncedRepo()
+    run(repo, "remote", "set-url", "origin", "ssh://example.invalid/x.git")
+    run(repo, "config", "core.sshCommand", fakeSsh(dir, 10))
+    const started = Date.now()
+    await expect(git(repo, ["fetch", "--quiet"], { timeout: 300 })).rejects.toThrow("git fetch timed out")
+    expect(Date.now() - started).toBeLessThan(5000)
   })
 })
 

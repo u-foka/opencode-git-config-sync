@@ -47,15 +47,39 @@ desktop.ini
 
 // GIT_OPTIONAL_LOCKS=0 keeps `git status` from rewriting the index, which would retrigger the file watcher.
 // GIT_TERMINAL_PROMPT=0 makes git fail instead of hanging the TUI on a credential prompt.
-export function git(repo: string, args: string[]): Promise<string> {
+export function git(
+  repo: string,
+  args: string[],
+  options: { timeout?: number; env?: Record<string, string> } = {},
+): Promise<string> {
   return new Promise((done, fail) =>
     execFile(
       "git",
       ["-C", repo, ...args],
-      { maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" } },
-      (error, stdout, stderr) => (error ? fail(new Error((stderr || error.message).trim())) : done(stdout)),
+      {
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: options.timeout,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", ...options.env },
+      },
+      (error, stdout, stderr) =>
+        error
+          ? fail(new Error(error.killed ? `git ${args[0]} timed out` : (stderr || error.message).trim()))
+          : done(stdout),
     ),
   )
+}
+
+export const BACKGROUND_TIMEOUT_MS = 60_000
+
+// GIT_TERMINAL_PROMPT=0 does not cover ssh, which asks on the terminal (unknown host key, key passphrase) and would
+// hang a background fetch behind the TUI. BatchMode makes it fail instead. An explicit GIT_SSH is left alone.
+async function batchSsh(repo: string): Promise<Record<string, string>> {
+  if (process.env.GIT_SSH) return {}
+  const base =
+    process.env.GIT_SSH_COMMAND ||
+    (await git(repo, ["config", "--get", "core.sshCommand"]).then((out) => out.trim(), () => "")) ||
+    "ssh"
+  return { GIT_SSH_COMMAND: `${base} -o BatchMode=yes` }
 }
 
 const succeeds = (promise: Promise<unknown>) => promise.then(() => true, () => false)
@@ -96,7 +120,7 @@ async function fetchIfStale(repo: string, staleMs: number) {
   const gitDir = (await git(repo, ["rev-parse", "--absolute-git-dir"])).trim()
   const fetchAge = await age(join(gitDir, "FETCH_HEAD"))
   if (fetchAge !== undefined && fetchAge < staleMs) return
-  await git(repo, ["fetch", "--quiet"]).catch(() => {})
+  await git(repo, ["fetch", "--quiet"], { timeout: BACKGROUND_TIMEOUT_MS, env: await batchSsh(repo) }).catch(() => {})
 }
 
 async function oldestCommitAge(repo: string, range: string) {

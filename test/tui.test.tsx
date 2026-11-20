@@ -237,6 +237,56 @@ describe("footer", () => {
   })
 })
 
+describe("/config-sync-setup", () => {
+  test("a retry after a failed setup shows the synced status", async () => {
+    const dir = fresh("setup")
+    const remote = join(dir, "remote.git")
+    const repo = join(dir, "config")
+    run(dir, "init", "-q", "--bare", remote)
+    write(join(repo, "cli.json"), "{}\n")
+    const identity = { name: run(dir, "config", "--global", "user.name").trim(), email: run(dir, "config", "--global", "user.email").trim() }
+    run(dir, "config", "--global", "user.useConfigOnly", "true")
+    run(dir, "config", "--global", "--unset", "user.name")
+    run(dir, "config", "--global", "--unset", "user.email")
+    try {
+      const { render, command, toasts } = await start(repo, {}, ["new", remote, "new", remote])
+      const footer = await render("prompt.footer.status")
+      await settle(footer, "cfg not synced")
+      await command("config-sync.setup")
+      expect(toasts.at(-1)).toMatchObject({ title: "Config sync setup failed" })
+      run(dir, "config", "--global", "user.name", identity.name)
+      run(dir, "config", "--global", "user.email", identity.email)
+      await command("config-sync.setup")
+      expect(toasts.at(-1)).toMatchObject({ message: "Config pushed to the new repo ✓" })
+      expect(await settle(footer, "cfg ✓")).toContain("cfg ✓")
+    } finally {
+      run(dir, "config", "--global", "--unset", "user.useConfigOnly")
+      run(dir, "config", "--global", "user.name", identity.name)
+      run(dir, "config", "--global", "user.email", identity.email)
+    }
+  })
+})
+
+describe("/config-sync-refresh", () => {
+  test("says so when a status check is already running", async () => {
+    const { command, toasts } = await start(syncedRepo().repo)
+    await command("config-sync.refresh")
+    expect(toasts.map((toast) => toast.message)).toContain(
+      "A config status check is already running; refreshing again after it",
+    )
+  })
+
+  test("says so while a sync is running", async () => {
+    const { repo } = syncedRepo()
+    write(join(repo, "a.md"), "x\n")
+    const { command, toasts } = await start(repo, {}, ["first"])
+    const sync = command("config-sync.sync")
+    await command("config-sync.refresh")
+    await sync
+    expect(toasts.map((toast) => toast.message)).toContain("Config sync is running; the status refreshes when it finishes")
+  })
+})
+
 describe("/config-sync", () => {
   test("stages before the prompt and commits with the confirmed message", async () => {
     const { repo, remote } = syncedRepo()

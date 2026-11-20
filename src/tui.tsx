@@ -183,9 +183,15 @@ export default Plugin.define({
     // Refreshes are skipped while a sync or setup runs (and those wait for an in-flight one), so a refresh's
     // `git fetch` can't race the pull for ref locks. `exclusive` refreshes once its task finishes.
     const refresh = async (force = false) => {
-      if (busy) return
+      if (busy) {
+        if (force)
+          context.ui.toast.show({ message: "Config sync is running; the status refreshes when it finishes", variant: "info" })
+        return
+      }
       if (running) {
         pending = true
+        if (force)
+          context.ui.toast.show({ message: "A config status check is already running; refreshing again after it", variant: "info" })
         return
       }
       running = true
