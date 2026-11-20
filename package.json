@@ -13,24 +13,30 @@
   "bugs": "https://github.com/u-foka/opencode-git-config-sync/issues",
   "type": "module",
   "exports": {
-    "./tui": "./src/tui.tsx"
+    "./tui": "./dist/tui.js"
   },
-  "files": ["src", "README.md", "LICENSE"],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
+    "build": "bun scripts/build.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "check": "bun run typecheck && bun run test",
+    "check": "bun run typecheck && bun run build && bun run test",
     "prepublishOnly": "bun run check"
   },
-  "dependencies": {
-    "@opencode/plugin": "^2.3.2"
-  },
   "peerDependencies": {
+    "@opencode/plugin": ">=2.3.2",
     "@opentui/core": ">=0.6.6",
     "@opentui/solid": ">=0.6.6",
     "solid-js": ">=1.9.0"
   },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": { "optional": true },
+    "@opentui/core": { "optional": true },
+    "@opentui/solid": { "optional": true },
+    "solid-js": { "optional": true }
+  },
   "devDependencies": {
+    "@opencode/plugin": "^2.3.2",
     "@opencode/theme": "2.3.2",
     "@opentui/core": "^0.9.4",
     "@opentui/solid": "^0.9.4",

@@ -1,3 +1,6 @@
 node_modules/
 *.tgz
 .DS_Store
+
+# dist/ is committed (see README, Development)
+!dist/

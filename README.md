@@ -181,6 +181,14 @@ bun, `./scripts/docker.sh` runs the same in the bun image CI uses (pass a comman
 - `test/tui.test.tsx` runs the plugin against a fake opencode context and renders the sidebar and status bar with
   opentui's test renderer, checking the text and colors, and the `/config-sync` dialogs.
 
+- `test/dist.test.ts` checks that the committed `dist/tui.js` matches `src` and imports only modules opencode provides.
+
+opencode loads `dist/tui.js`, built by `bun run build` (part of `bun run check`). It is committed, so a git checkout
+(e.g. a submodule in your config folder) works without a build step: rebuild and commit it with every change to `src`.
+The plugin ships compiled JavaScript because opencode's Solid JSX transform skips `.tsx` files installed under
+`node_modules` ([anomalyco/opencode#39986](https://github.com/anomalyco/opencode/issues/39986)); such a plugin loads
+its own copy of solid-js and its status never updates.
+
 `npm publish` runs the checks first (`prepublishOnly`).
 
 ## License
