@@ -30,7 +30,7 @@ you change the number:
 
 ```json
 {
-  "plugins": ["opencode-git-config-sync@0.1.0"]
+  "plugins": ["opencode-git-config-sync@0.1.2"]
 }
 ```
 
@@ -69,6 +69,8 @@ If the config folder is not a repository, the plugin suggests setup once a day.
 - The status refreshes when files in the config folder change (recursive file watcher), after every model turn, and
   every 5 minutes.
 - It runs `git fetch` at most once per 24h. It never pulls or pushes on its own. `/config-sync-fetch` forces a fetch at any time.
+  The background fetch never prompts: ssh runs in batch mode (keeping your `core.sshCommand`), and the fetch gives up
+  after 60s, so an unknown host key or a passphrase prompt can't hang the status.
 - Submodules are updated (`git submodule update --init --recursive`) after a pull.
 - A submodule that moved to a new commit counts as a change: `/config-sync` commits the new pointer like any other
   file.
