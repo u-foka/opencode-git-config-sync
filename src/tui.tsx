@@ -4,6 +4,7 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { createSignal, For, Match, Show, Switch } from "solid-js"
 import {
   configDir,
+  fetchRepo,
   proposeMessage,
   readStatus,
   repoState,
@@ -285,12 +286,43 @@ export default Plugin.define({
             if (!message)
               return context.ui.toast.show({ message: "Config sync cancelled; the changes stay staged", variant: "info" })
           }
-          await sync(repo, message, (step) =>
+          const result = await sync(repo, message, (step) =>
             context.ui.toast.show({ message: `Config sync: ${step}…`, variant: "info", duration: 2000 }),
           )
-          context.ui.toast.show({ title: "Config sync", message: "Config repo synced ✓", variant: "success" })
+          context.ui.toast.show({
+            title: "Config sync",
+            message: `Config repo synced ✓ (↑${result.pushed} pushed, ↓${result.pulled} pulled)`,
+            variant: "success",
+          })
         } catch (error) {
           failed("Config sync failed", error)
+        }
+      })
+
+    const runFetch = () =>
+      exclusive(async () => {
+        try {
+          const state = await repoState(repo)
+          if (state !== "ready") {
+            context.ui.toast.show({
+              title: "Config sync",
+              message: "Config repo is not set up; run /config-sync-setup",
+              variant: "info",
+            })
+            return
+          }
+          const { before, after } = await fetchRepo(repo)
+          const fetched = after - before
+          context.ui.toast.show({
+            title: "Config fetch",
+            message:
+              fetched > 0
+                ? `Fetched ↓${fetched} new commit${fetched === 1 ? "" : "s"} to pull`
+                : "Already up to date",
+            variant: "success",
+          })
+        } catch (error) {
+          failed("Config fetch failed", error)
         }
       })
 
@@ -353,6 +385,14 @@ export default Plugin.define({
           palette: true,
           slash: { name: "config-sync-refresh" },
           run: () => refresh(true),
+        },
+        {
+          id: "config-sync.fetch",
+          title: "Fetch config repo",
+          group: "Config sync",
+          palette: true,
+          slash: { name: "config-sync-fetch" },
+          run: () => runFetch(),
         },
         {
           id: "config-sync.setup",

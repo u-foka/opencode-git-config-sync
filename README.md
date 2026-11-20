@@ -44,7 +44,8 @@ HTTPS). The plugin never asks for passwords; git fails with an error instead.
 
 | Command                | What it does                                                                             |
 | ---------------------- | ---------------------------------------------------------------------------------------- |
-| `/config-sync`         | Stage all changes, commit (asks for a message, with a proposed one), pull --rebase, push. Cancelling leaves the changes staged. |
+| `/config-sync`         | Stage all changes, commit (asks for a message, with a proposed one), pull --rebase, push. Cancelling leaves the changes staged. The result toast reports how many commits were pushed and pulled. |
+| `/config-sync-fetch`   | Force a `git fetch` now (ignoring the 24h gate) and refresh the status, so the ahead/behind counts reflect the remote. |
 | `/config-sync-refresh` | Refresh the status now, and show the outdated warning again if it applies.               |
 | `/config-sync-setup`   | Set up the config folder: **Start new** or **Pull existing config**.                     |
 
@@ -67,7 +68,7 @@ If the config folder is not a repository, the plugin suggests setup once a day.
 
 - The status refreshes when files in the config folder change (recursive file watcher), after every model turn, and
   every 5 minutes.
-- It runs `git fetch` at most once per 24h. It never pulls or pushes on its own.
+- It runs `git fetch` at most once per 24h. It never pulls or pushes on its own. `/config-sync-fetch` forces a fetch at any time.
 - Submodules are updated (`git submodule update --init --recursive`) after a pull.
 - A submodule that moved to a new commit counts as a change: `/config-sync` commits the new pointer like any other
   file.

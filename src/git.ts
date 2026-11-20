@@ -231,7 +231,7 @@ export async function stageAll(repo: string) {
   await git(repo, ["add", "--all"])
 }
 
-export async function sync(repo: string, message: string | undefined, onStep: (step: SyncStep) => void) {
+export async function sync(repo: string, message: string | undefined, onStep: (step: SyncStep) => void): Promise<{ pushed: number; pulled: number }> {
   if ((await repoState(repo)) !== "ready") throw new Error("Config repo is not set up; run /config-sync-setup")
   const unpushed = await unpushedSubmodules(repo)
   if (unpushed.length) throw new Error(unpushedMessage(unpushed))
@@ -239,6 +239,12 @@ export async function sync(repo: string, message: string | undefined, onStep: (s
     onStep("commit")
     await git(repo, ["commit", "--quiet", "-m", message])
   }
+  // Force a fetch so the counts and the pull reflect the remote's current state, even when the automatic 24h
+  // fetch has not run yet.
+  await git(repo, ["fetch", "--quiet"])
+  const [left, right] = (await git(repo, ["rev-list", "--left-right", "--count", "HEAD...@{u}"])).trim().split(/\\s+/)
+  const pushed = Number(left) || 0
+  const pulled = Number(right) || 0
   onStep("pull")
   try {
     await git(repo, ["pull", "--rebase", "--quiet", "--no-recurse-submodules"])
@@ -253,6 +259,23 @@ export async function sync(repo: string, message: string | undefined, onStep: (s
   onStep("push")
   // "check" refuses to push a submodule pointer whose commit is not on the submodule's remote yet.
   await git(repo, ["push", "--quiet", "--recurse-submodules=check"])
+  return { pushed, pulled }
+}
+
+/** Force a fetch regardless of the 24h staleness gate, updating the remote-tracking refs. */
+export async function fetchRepo(repo: string): Promise<{ before: number; after: number }> {
+  if ((await repoState(repo)) !== "ready") throw new Error("Config repo is not set up; run /config-sync-setup")
+  const behind = async () => {
+    try {
+      return Number((await git(repo, ["rev-list", "--count", "HEAD..@{u}"])).trim()) || 0
+    } catch {
+      return 0
+    }
+  }
+  const before = await behind()
+  await git(repo, ["fetch", "--quiet"])
+  const after = await behind()
+  return { before, after }
 }
 
 async function remoteBranch(repo: string, url: string): Promise<string | undefined> {
