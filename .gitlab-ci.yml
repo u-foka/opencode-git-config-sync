@@ -38,7 +38,12 @@ test:
     - apt-get update -qq && apt-get install -y -qq git > /dev/null
     - bun install --frozen-lockfile
   script:
-    - bun test
+    - bun test --coverage --coverage-reporter=text --coverage-reporter=lcov
+  coverage: '/All files\s*\|\s*[\d.]+\s*\|\s*([\d.]+)/'
+  artifacts:
+    when: always
+    paths:
+      - coverage/lcov.info
 
 package:
   stage: package

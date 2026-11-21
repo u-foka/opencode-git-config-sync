@@ -4,3 +4,4 @@ node_modules/
 
 # dist/ is committed (see README, Development)
 !dist/
+coverage/
