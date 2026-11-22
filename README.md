@@ -30,7 +30,7 @@ you change the number:
 
 ```json
 {
-  "plugins": ["opencode-git-config-sync@0.2.0"]
+  "plugins": ["opencode-git-config-sync@0.3.0"]
 }
 ```
 
