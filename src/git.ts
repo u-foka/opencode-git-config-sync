@@ -187,8 +187,8 @@ async function changedFiles(repo: string): Promise<{ files: ChangedFile[]; dirty
   return { files: counted, dirtySubmodules }
 }
 
-export async function readStatus(repo: string, staleMs: number): Promise<SyncStatus> {
-  await fetchIfStale(repo, staleMs)
+export async function readStatus(repo: string, staleMs: number, fetchMs = staleMs): Promise<SyncStatus> {
+  await fetchIfStale(repo, fetchMs)
   const [left, right] = (await git(repo, ["rev-list", "--left-right", "--count", "HEAD...@{u}"])).trim().split(/\s+/)
   const ahead = Number(left) || 0
   const behind = Number(right) || 0
@@ -263,7 +263,7 @@ export async function sync(repo: string, message: string | undefined, onStep: (s
     onStep("commit")
     await git(repo, ["commit", "--quiet", "-m", message])
   }
-  // Force a fetch so the counts and the pull reflect the remote's current state, even when the automatic 24h
+  // Force a fetch so the counts and the pull reflect the remote's current state, even when the automatic
   // fetch has not run yet.
   await git(repo, ["fetch", "--quiet"])
   const [left, right] = (await git(repo, ["rev-list", "--left-right", "--count", "HEAD...@{u}"])).trim().split(/\s+/)
@@ -286,7 +286,7 @@ export async function sync(repo: string, message: string | undefined, onStep: (s
   return { pushed, pulled }
 }
 
-/** Force a fetch regardless of the 24h staleness gate, updating the remote-tracking refs. */
+/** Force a fetch regardless of the fetch interval, updating the remote-tracking refs. */
 export async function fetchRepo(repo: string): Promise<{ before: number; after: number }> {
   if ((await repoState(repo)) !== "ready") throw new Error("Config repo is not set up; run /config-sync-setup")
   const behind = async () => {

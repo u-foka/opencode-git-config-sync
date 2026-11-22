@@ -28,6 +28,7 @@ interface Options {
   readonly repo?: string
   readonly staleHours?: number
   readonly refreshMinutes?: number
+  readonly fetchMinutes?: number
   readonly maxFiles?: number
   readonly label?: string
 }
@@ -159,6 +160,7 @@ export default Plugin.define({
     const repo = configDir(options.repo)
     const staleMs = (options.staleHours ?? 24) * HOUR_MS
     const refreshMs = (options.refreshMinutes ?? 5) * 60 * 1000
+    const fetchMs = (options.fetchMinutes ?? 60) * 60 * 1000
     setSettings({ maxFiles: options.maxFiles ?? 3, label: options.label ?? "cfg" })
 
     const [reminders, setReminders] = context.storage.store("reminders", { initial: { outdated: 0, setup: 0 } })
@@ -212,7 +214,7 @@ export default Plugin.define({
             )
           return
         }
-        const status = await readStatus(repo, staleMs)
+        const status = await readStatus(repo, staleMs, fetchMs)
         show({ state, status })
         if (status.outdated)
           await remind("outdated", force, () =>
@@ -260,7 +262,7 @@ export default Plugin.define({
       exclusive(async () => {
         try {
           if ((await repoState(repo)) === "no-repo") return void (await runSetup())
-          const status = await readStatus(repo, staleMs)
+          const status = await readStatus(repo, staleMs, fetchMs)
           // Checked before any dialog or staging. Pushing such a pointer would break the submodule update on every
           // other machine (and the push refuses it anyway).
           if (status.unpushedSubmodules.length) return failed("Config sync stopped", new Error(unpushedMessage(status.unpushedSubmodules)))
@@ -281,7 +283,7 @@ export default Plugin.define({
           let message: string | undefined
           if (status.files.length) {
             await stageAll(repo)
-            const staged = await readStatus(repo, staleMs)
+            const staged = await readStatus(repo, staleMs, fetchMs)
             message = (
               await context.ui.dialog.prompt({
                 title: "Commit config changes",

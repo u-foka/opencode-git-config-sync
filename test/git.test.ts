@@ -123,6 +123,21 @@ describe("background fetch", () => {
     return script
   }
 
+  test("fetches on its own interval, separate from the outdated age", async () => {
+    const { dir, remote, repo } = syncedRepo()
+    run(repo, "fetch", "-q")
+    const other = otherMachine(dir, remote)
+    write(join(other, "theirs.md"), "t\n")
+    run(other, "add", "-A")
+    run(other, "commit", "-qm", "theirs")
+    run(other, "push", "-q")
+
+    expect((await readStatus(repo, DAY_MS, DAY_MS)).behind).toBe(0)
+    const status = await readStatus(repo, DAY_MS, 0)
+    expect(status.behind).toBe(1)
+    expect(status.outdated).toBe(false)
+  })
+
   test("runs ssh in batch mode, keeping the configured ssh command", async () => {
     const { dir, repo } = syncedRepo()
     run(repo, "remote", "set-url", "origin", "ssh://example.invalid/x.git")
