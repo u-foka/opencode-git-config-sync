@@ -223,7 +223,7 @@ async function sync(repo, message, onStep) {
     await git(repo, ["commit", "--quiet", "-m", message]);
   }
   await git(repo, ["fetch", "--quiet"]);
-  const [left, right] = (await git(repo, ["rev-list", "--left-right", "--count", "HEAD...@{u}"])).trim().split(/\\s+/);
+  const [left, right] = (await git(repo, ["rev-list", "--left-right", "--count", "HEAD...@{u}"])).trim().split(/\s+/);
   const pushed = Number(left) || 0;
   const pulled = Number(right) || 0;
   onStep("pull");

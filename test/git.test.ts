@@ -246,8 +246,27 @@ describe("sync", () => {
     write(join(repo, "mine.md"), "m\n")
     await stageAll(repo)
 
-    await sync(repo, "mine", () => {})
+    expect(await sync(repo, "mine", () => {})).toEqual({ pushed: 1, pulled: 1 })
     expect(run(remote, "log", "--format=%s").trim().split("\n")).toEqual(["mine", "theirs", "initial"])
+  })
+
+  test("reports how many commits it pushed and pulled", async () => {
+    const { dir, remote, repo } = syncedRepo()
+    const other = otherMachine(dir, remote)
+    for (const name of ["t1", "t2", "t3"]) {
+      write(join(other, `${name}.md`), `${name}\n`)
+      run(other, "add", "-A")
+      run(other, "commit", "-qm", name)
+    }
+    run(other, "push", "-q")
+    write(join(repo, "m1.md"), "m1\n")
+    run(repo, "add", "-A")
+    run(repo, "commit", "-qm", "m1")
+    write(join(repo, "m2.md"), "m2\n")
+    await stageAll(repo)
+
+    expect(await sync(repo, "m2", () => {})).toEqual({ pushed: 2, pulled: 3 })
+    expect(await sync(repo, undefined, () => {})).toEqual({ pushed: 0, pulled: 0 })
   })
 
   test("aborts a conflicting rebase and keeps the local commit", async () => {
@@ -271,7 +290,7 @@ describe("sync", () => {
     run(repo, "commit", "-qm", "already committed")
 
     const steps: string[] = []
-    await sync(repo, undefined, (step) => steps.push(step))
+    expect(await sync(repo, undefined, (step) => steps.push(step))).toEqual({ pushed: 1, pulled: 0 })
     expect(steps).toEqual(["pull", "submodules", "push"])
     expect(run(remote, "log", "-1", "--format=%s").trim()).toBe("already committed")
   })

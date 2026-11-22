@@ -266,7 +266,7 @@ export async function sync(repo: string, message: string | undefined, onStep: (s
   // Force a fetch so the counts and the pull reflect the remote's current state, even when the automatic 24h
   // fetch has not run yet.
   await git(repo, ["fetch", "--quiet"])
-  const [left, right] = (await git(repo, ["rev-list", "--left-right", "--count", "HEAD...@{u}"])).trim().split(/\\s+/)
+  const [left, right] = (await git(repo, ["rev-list", "--left-right", "--count", "HEAD...@{u}"])).trim().split(/\s+/)
   const pushed = Number(left) || 0
   const pulled = Number(right) || 0
   onStep("pull")
