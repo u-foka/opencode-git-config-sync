@@ -1,26 +1,32 @@
 // @bun
 // src/tui.tsx
-import { createTextNode as _$createTextNode } from "@opentui/solid";
-import { insertNode as _$insertNode } from "@opentui/solid";
-import { setProp as _$setProp } from "@opentui/solid";
-import { effect as _$effect } from "@opentui/solid";
-import { insert as _$insert } from "@opentui/solid";
-import { createElement as _$createElement } from "@opentui/solid";
-import { createComponent as _$createComponent } from "@opentui/solid";
+import { createTextNode as _$createTextNode2 } from "@opentui/solid";
+import { insertNode as _$insertNode2 } from "@opentui/solid";
+import { setProp as _$setProp2 } from "@opentui/solid";
+import { effect as _$effect2 } from "@opentui/solid";
+import { insert as _$insert2 } from "@opentui/solid";
+import { createElement as _$createElement2 } from "@opentui/solid";
+import { createComponent as _$createComponent2 } from "@opentui/solid";
 import { memo as _$memo } from "@opentui/solid";
 import { watch } from "fs";
-import { Plugin, usePlugin } from "@opencode/plugin/tui";
-import { createSignal, For, Match, Show, Switch } from "solid-js";
+import { Plugin, usePlugin as usePlugin2 } from "@opencode/plugin/tui";
+import { createSignal as createSignal2, For as For2, Match, Show, Switch } from "solid-js";
 
 // src/git.ts
 import { execFile } from "child_process";
-import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
+import { appendFile, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { dirname, join } from "path";
+import { basename, dirname, join, sep } from "path";
 var DEFAULT_GITIGNORE = `node_modules/
 
 # local service credentials
 service.json
+
+# secrets
+.env
+.env.*
+*.pem
+*.key
 
 # machine-specific overrides
 *.local.json
@@ -39,7 +45,7 @@ function git(repo, args, options = {}) {
     maxBuffer: 16 * 1024 * 1024,
     timeout: options.timeout,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", ...options.env }
-  }, (error, stdout, stderr) => error ? fail(new Error(error.killed ? `git ${args[0]} timed out` : (stderr || error.message).trim())) : done(stdout)));
+  }, (error, stdout, stderr) => error ? fail(new Error(error.killed ? `git ${args[0]} timed out` : redact((stderr || error.message).trim()))) : done(stdout)));
 }
 var BACKGROUND_TIMEOUT_MS = 60000;
 async function batchSsh(repo) {
@@ -57,6 +63,59 @@ var age = async (path) => {
   }
 };
 var exists = async (path) => await age(path) !== undefined;
+var redact = (text) => text.replace(/(https?:\/\/)[^/@\s]+@/gi, "$1***@").replace(/(\w+:\/\/[^/@:\s]*):[^/@\s]+@/g, "$1:***@");
+var printable = (text, keepLines = false) => text.replace(keepLines ? /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g : /[\x00-\x1f\x7f-\x9f]/g, "\uFFFD");
+var SECRET_FILES = [
+  [/^\.env(\..+)?$/, "env file"],
+  [/\.(pem|key|p12|pfx)$/i, "key file"],
+  [/^id_(rsa|dsa|ecdsa|ed25519)$/, "SSH key"],
+  [/^auth\.json$/, "credentials file"]
+];
+var SECRET_TEXT = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, "private key"],
+  [/\b(sk-[\w-]{20,}|gh[pousr]_\w{20,}|github_pat_\w{20,}|glpat-[\w-]{20,}|xox[abprs]-[\w-]{10,}|AKIA[0-9A-Z]{16})/, "token"]
+];
+var ASSIGNMENT = /["']?([\w.-]+)["']?\s*[:=]\s*["']?([^"'\s,}]+)/g;
+var SECRET_KEY = [/(^|[_.-])(api[_-]?key|token|secret|pass|passwd|password)$/i, /[a-z](ApiKey|Token|Secret|Pass|Passwd|Password)$/];
+var PLACEHOLDER = /^(\{(env|file):|\$|<|true$|false$|null$|\d+$)/;
+function secretInLine(line) {
+  for (const [pattern, reason] of SECRET_TEXT)
+    if (pattern.test(line))
+      return reason;
+  for (const [, key, value] of line.matchAll(ASSIGNMENT))
+    if (SECRET_KEY.some((pattern) => pattern.test(key)) && !PLACEHOLDER.test(value))
+      return `${key} value`;
+  return;
+}
+async function stagedSecrets(repo) {
+  const found = new Set;
+  const names = await git(repo, ["diff", "--cached", "--name-only", "--diff-filter=d", "--no-renames", "-z"]);
+  for (const path of names.split("\x00").filter(Boolean))
+    for (const [pattern, reason] of SECRET_FILES)
+      if (pattern.test(basename(path)))
+        found.add(`${path} (${reason})`);
+  const diff = await git(repo, ["-c", "core.quotePath=false", "diff", "--cached", "--no-renames", "--no-color", "--no-ext-diff", "-U0"]);
+  let path = "";
+  for (const line of diff.split(`
+`)) {
+    if (line.startsWith("+++ "))
+      path = line.slice(4).replace(/^b\//, "");
+    else if (line.startsWith("+")) {
+      const reason = secretInLine(line.slice(1));
+      if (reason)
+        found.add(`${path} (${reason})`);
+    }
+  }
+  return [...found];
+}
+function unsafePath(path) {
+  const parts = path.split(process.platform === "win32" ? /[\\/]/ : "/");
+  return path.startsWith("/") || /^[a-z]:/i.test(path) || parts.some((part) => part === "" || part === "." || part === ".." || part.toLowerCase() === ".git");
+}
+async function insideRepo(repo, path) {
+  const [root, parent] = await Promise.all([realpath(repo), realpath(dirname(path))]);
+  return parent === root || parent.startsWith(root + sep);
+}
 function configDir(override) {
   if (override)
     return override.replace(/^~(?=$|[\\/])/, homedir());
@@ -258,11 +317,11 @@ async function fetchRepo(repo) {
   return { before, after };
 }
 async function remoteBranch(repo, url) {
-  const heads = (await git(repo, ["ls-remote", "--heads", url])).split(`
+  const heads = (await git(repo, ["ls-remote", "--heads", "--end-of-options", url])).split(`
 `).map((line) => line.split("\trefs/heads/")[1]).filter((name) => !!name);
   if (!heads.length)
     return;
-  const symref = (await git(repo, ["ls-remote", "--symref", url, "HEAD"])).match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1];
+  const symref = (await git(repo, ["ls-remote", "--symref", "--end-of-options", url, "HEAD"])).match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1];
   return [symref, "main", "master"].find((name) => name && heads.includes(name)) ?? heads[0];
 }
 async function ensureGitignore(repo) {
@@ -292,7 +351,7 @@ async function undoSetup(repo, error, undo) {
   }
   throw new Error(`${message} (setup undone, the config folder is as before)`);
 }
-async function setupNew(repo, url, message) {
+async function setupNew(repo, url, message, confirmSecrets = async () => true) {
   if (await repoState(repo) !== "no-repo")
     throw new Error("Config directory is already a git repository");
   if (await remoteBranch(repo, url))
@@ -301,16 +360,24 @@ async function setupNew(repo, url, message) {
   const originalGitignore = await readFile(gitignore, "utf8").catch(() => {
     return;
   });
+  const restoreGitignore = () => originalGitignore === undefined ? rm(gitignore, { force: true }) : writeFile(gitignore, originalGitignore);
   try {
     await git(repo, ["init", "--quiet"]);
     await ensureGitignore(repo);
     await git(repo, ["add", "--all"]);
+    const found = await stagedSecrets(repo);
+    if (found.length && !await confirmSecrets(found)) {
+      await restoreGitignore();
+      await rm(join(repo, ".git"), { recursive: true, force: true });
+      return false;
+    }
     await git(repo, ["commit", "--quiet", "-m", message]);
-    await git(repo, ["remote", "add", "origin", url]);
+    await git(repo, ["remote", "add", "--end-of-options", "origin", url]);
     await git(repo, ["push", "--quiet", "-u", "origin", "HEAD"]);
   } catch (error) {
-    await undoSetup(repo, error, () => originalGitignore === undefined ? rm(gitignore, { force: true }) : writeFile(gitignore, originalGitignore));
+    await undoSetup(repo, error, restoreGitignore);
   }
+  return true;
 }
 async function setupExisting(repo, url) {
   if (await repoState(repo) !== "no-repo")
@@ -322,13 +389,19 @@ async function setupExisting(repo, url) {
   const moved = [];
   try {
     await git(repo, ["init", "--quiet", `--initial-branch=${branch}`]);
-    await git(repo, ["remote", "add", "origin", url]);
-    await git(repo, ["fetch", "--quiet", "origin"]);
+    await git(repo, ["remote", "add", "--end-of-options", "origin", url]);
+    await git(repo, ["-c", "transfer.fsckObjects=true", "fetch", "--quiet", "origin"]);
     const remoteFiles = (await git(repo, ["ls-tree", "-r", "-z", "--name-only", `origin/${branch}`])).split("\x00").filter(Boolean);
+    const unsafe = remoteFiles.find(unsafePath);
+    if (unsafe)
+      throw new Error(`Remote has an unsafe path: ${unsafe}`);
     const clashing = [];
     for (const path of remoteFiles)
-      if (await exists(join(repo, path)))
+      if (await lstat(join(repo, path)).then(() => true, () => false))
         clashing.push(path);
+    for (const path of clashing)
+      if (!await insideRepo(repo, join(repo, path)))
+        throw new Error(`${path} is behind a symbolic link that leaves the config folder`);
     if (clashing.length) {
       backup = `.config-sync-backup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
       const gitDir = (await git(repo, ["rev-parse", "--absolute-git-dir"])).trim();
@@ -359,13 +432,178 @@ async function setupExisting(repo, url) {
   return { backup, moved };
 }
 
+// src/commit-dialog.tsx
+import { effect as _$effect } from "@opentui/solid";
+import { createComponent as _$createComponent } from "@opentui/solid";
+import { use as _$use } from "@opentui/solid";
+import { createTextNode as _$createTextNode } from "@opentui/solid";
+import { insertNode as _$insertNode } from "@opentui/solid";
+import { insert as _$insert } from "@opentui/solid";
+import { setProp as _$setProp } from "@opentui/solid";
+import { createElement as _$createElement } from "@opentui/solid";
+import { TextAttributes } from "@opentui/core";
+import { usePlugin } from "@opencode/plugin/tui";
+import { createSignal, For, onMount } from "solid-js";
+var FOCUS = ["edit", "commit", "cancel"];
+function CommitDialog(props) {
+  const context = usePlugin();
+  const theme = context.theme.surface("dialog");
+  const [active, setActive] = createSignal("edit");
+  let textarea;
+  const commit = () => props.onCommit(textarea?.plainText ?? props.value);
+  const focus = (next) => {
+    setActive(next);
+    if (next === "edit")
+      textarea?.focus();
+    else
+      textarea?.blur();
+  };
+  const move = (step) => focus(FOCUS[(FOCUS.indexOf(active()) + step + FOCUS.length) % FOCUS.length]);
+  const onButtons = () => active() !== "edit";
+  context.keymap.layer(() => ({
+    mode: "modal",
+    priority: 2,
+    commands: [{
+      bind: "tab",
+      title: "Next field",
+      group: "Commit dialog",
+      run: () => move(1)
+    }, {
+      bind: "shift+tab",
+      title: "Previous field",
+      group: "Commit dialog",
+      run: () => move(-1)
+    }, {
+      bind: "ctrl+s",
+      title: "Commit",
+      group: "Commit dialog",
+      run: commit
+    }, {
+      bind: "return",
+      title: "Choose button",
+      group: "Commit dialog",
+      enabled: onButtons,
+      run: () => active() === "commit" ? commit() : props.onCancel()
+    }, {
+      bind: "left",
+      title: "Previous button",
+      group: "Commit dialog",
+      enabled: onButtons,
+      run: () => focus("commit")
+    }, {
+      bind: "right",
+      title: "Next button",
+      group: "Commit dialog",
+      enabled: onButtons,
+      run: () => focus("cancel")
+    }]
+  }));
+  onMount(() => {
+    context.ui.dialog.set({
+      size: "large"
+    });
+    setTimeout(() => {
+      if (textarea && !textarea.isDestroyed && active() === "edit")
+        textarea.focus();
+    }, 1);
+  });
+  const buttons = [{
+    key: "commit",
+    label: "Commit",
+    run: commit
+  }, {
+    key: "cancel",
+    label: "Cancel",
+    run: () => props.onCancel()
+  }];
+  return (() => {
+    var _el$ = _$createElement("box"), _el$2 = _$createElement("box"), _el$3 = _$createElement("text"), _el$4 = _$createElement("text"), _el$6 = _$createElement("text"), _el$7 = _$createElement("textarea"), _el$8 = _$createElement("box"), _el$9 = _$createElement("text"), _el$1 = _$createElement("box");
+    _$insertNode(_el$, _el$2);
+    _$insertNode(_el$, _el$6);
+    _$insertNode(_el$, _el$7);
+    _$insertNode(_el$, _el$8);
+    _$setProp(_el$, "paddingLeft", 3);
+    _$setProp(_el$, "paddingRight", 3);
+    _$setProp(_el$, "paddingBottom", 1);
+    _$setProp(_el$, "gap", 1);
+    _$insertNode(_el$2, _el$3);
+    _$insertNode(_el$2, _el$4);
+    _$setProp(_el$2, "flexDirection", "row");
+    _$setProp(_el$2, "justifyContent", "space-between");
+    _$insert(_el$3, () => props.title);
+    _$insertNode(_el$4, _$createTextNode(`esc`));
+    _$setProp(_el$4, "onMouseUp", () => props.onCancel());
+    _$insert(_el$6, () => props.description);
+    _$use((value) => textarea = value, _el$7);
+    _$setProp(_el$7, "height", 6);
+    _$setProp(_el$7, "wrapMode", "word");
+    _$setProp(_el$7, "onSubmit", () => textarea?.newLine());
+    _$setProp(_el$7, "onMouseDown", () => focus("edit"));
+    _$insertNode(_el$8, _el$9);
+    _$insertNode(_el$8, _el$1);
+    _$setProp(_el$8, "flexDirection", "row");
+    _$setProp(_el$8, "justifyContent", "space-between");
+    _$insertNode(_el$9, _$createTextNode(`enter new line \xB7 ctrl+s commit \xB7 tab buttons \xB7 esc cancel`));
+    _$setProp(_el$1, "flexDirection", "row");
+    _$insert(_el$1, _$createComponent(For, {
+      each: buttons,
+      children: (button) => (() => {
+        var _el$10 = _$createElement("box"), _el$11 = _$createElement("text");
+        _$insertNode(_el$10, _el$11);
+        _$setProp(_el$10, "paddingLeft", 1);
+        _$setProp(_el$10, "paddingRight", 1);
+        _$setProp(_el$10, "onMouseUp", () => button.run());
+        _$insert(_el$11, () => button.label);
+        _$effect((_p$) => {
+          var _v$10 = active() === button.key ? theme.background.action.primary.focused : undefined, _v$11 = active() === button.key ? theme.text.action.primary.focused : theme.text.muted;
+          _v$10 !== _p$.e && (_p$.e = _$setProp(_el$10, "backgroundColor", _v$10, _p$.e));
+          _v$11 !== _p$.t && (_p$.t = _$setProp(_el$11, "fg", _v$11, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
+        return _el$10;
+      })()
+    }));
+    _$effect((_p$) => {
+      var _v$ = TextAttributes.BOLD, _v$2 = theme.text.base, _v$3 = theme.text.muted, _v$4 = theme.text.muted, _v$5 = props.value, _v$6 = theme.text.formfield.base, _v$7 = theme.text.formfield.base, _v$8 = theme.background.formfield.base, _v$9 = theme.background.formfield.base, _v$0 = theme.text.base, _v$1 = theme.text.muted;
+      _v$ !== _p$.e && (_p$.e = _$setProp(_el$3, "attributes", _v$, _p$.e));
+      _v$2 !== _p$.t && (_p$.t = _$setProp(_el$3, "fg", _v$2, _p$.t));
+      _v$3 !== _p$.a && (_p$.a = _$setProp(_el$4, "fg", _v$3, _p$.a));
+      _v$4 !== _p$.o && (_p$.o = _$setProp(_el$6, "fg", _v$4, _p$.o));
+      _v$5 !== _p$.i && (_p$.i = _$setProp(_el$7, "initialValue", _v$5, _p$.i));
+      _v$6 !== _p$.n && (_p$.n = _$setProp(_el$7, "textColor", _v$6, _p$.n));
+      _v$7 !== _p$.s && (_p$.s = _$setProp(_el$7, "focusedTextColor", _v$7, _p$.s));
+      _v$8 !== _p$.h && (_p$.h = _$setProp(_el$7, "backgroundColor", _v$8, _p$.h));
+      _v$9 !== _p$.r && (_p$.r = _$setProp(_el$7, "focusedBackgroundColor", _v$9, _p$.r));
+      _v$0 !== _p$.d && (_p$.d = _$setProp(_el$7, "cursorColor", _v$0, _p$.d));
+      _v$1 !== _p$.l && (_p$.l = _$setProp(_el$9, "fg", _v$1, _p$.l));
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined,
+      a: undefined,
+      o: undefined,
+      i: undefined,
+      n: undefined,
+      s: undefined,
+      h: undefined,
+      r: undefined,
+      d: undefined,
+      l: undefined
+    });
+    return _el$;
+  })();
+}
+
 // src/tui.tsx
 var HOUR_MS = 60 * 60 * 1000;
 var STICKY_MS = 2147483647;
 var WATCH_DEBOUNCE_MS = 500;
 var IGNORED = [/^\.git\/(objects|logs)\//, /\.lock$/, /(^|\/)node_modules(\/|$)/];
-var [view, setView] = createSignal();
-var [settings, setSettings] = createSignal({
+var [view, setView] = createSignal2();
+var [settings, setSettings] = createSignal2({
   maxFiles: 3,
   label: "cfg"
 });
@@ -379,11 +617,11 @@ function rows(status) {
   const extra = [...new Set([...status.dirtySubmodules, ...status.unpushedSubmodules])].filter((path) => !listed.has(path));
   return [
     ...status.files.map((file) => ({
-      text: `  ${file.code.padEnd(2)} ${file.path} ${lineCounts(file)}`.trimEnd() + note(file.path),
+      text: `  ${file.code.padEnd(2)} ${printable(file.path)} ${lineCounts(file)}`.trimEnd() + note(file.path),
       warn: dirty.has(file.path) || unpushed.has(file.path)
     })),
     ...extra.map((path) => ({
-      text: `${unpushed.has(path) ? "\u2757" : "  "}${dirty.has(path) ? "m " : "\u2191 "} ${path}${note(path)}`,
+      text: `${unpushed.has(path) ? "\u2757" : "  "}${dirty.has(path) ? "m " : "\u2191 "} ${printable(path)}${note(path)}`,
       warn: true
     }))
   ];
@@ -394,27 +632,27 @@ function summary(status) {
   return `${settings().label} ${text || "\u2713"}`;
 }
 function FooterStatus() {
-  const context = usePlugin();
-  return _$createComponent(Switch, {
+  const context = usePlugin2();
+  return _$createComponent2(Switch, {
     get children() {
-      return [_$createComponent(Match, {
+      return [_$createComponent2(Match, {
         get when() {
           return _$memo(() => view()?.state === "ready")() && view().status;
         },
         children: (status) => (() => {
-          var _el$2 = _$createElement("text");
-          _$insert(_el$2, () => (status().outdated ? "\u2757 " : "") + summary(status()));
-          _$effect((_$p) => _$setProp(_el$2, "fg", status().outdated ? context.theme.text.feedback.error.base : context.theme.text.muted, _$p));
+          var _el$2 = _$createElement2("text");
+          _$insert2(_el$2, () => (status().outdated ? "\u2757 " : "") + summary(status()));
+          _$effect2((_$p) => _$setProp2(_el$2, "fg", status().outdated ? context.theme.text.feedback.error.base : context.theme.text.muted, _$p));
           return _el$2;
         })()
-      }), _$createComponent(Match, {
+      }), _$createComponent2(Match, {
         get when() {
           return view();
         },
         get children() {
-          var _el$ = _$createElement("text");
-          _$insert(_el$, () => `${settings().label} not synced`);
-          _$effect((_$p) => _$setProp(_el$, "fg", context.theme.text.muted, _$p));
+          var _el$ = _$createElement2("text");
+          _$insert2(_el$, () => `${settings().label} not synced`);
+          _$effect2((_$p) => _$setProp2(_el$, "fg", context.theme.text.muted, _$p));
           return _el$;
         }
       })];
@@ -422,10 +660,10 @@ function FooterStatus() {
   });
 }
 function SidebarStatus() {
-  const context = usePlugin();
-  return _$createComponent(Switch, {
+  const context = usePlugin2();
+  return _$createComponent2(Switch, {
     get children() {
-      return [_$createComponent(Match, {
+      return [_$createComponent2(Match, {
         get when() {
           return _$memo(() => view()?.state === "ready")() && view().status;
         },
@@ -434,70 +672,70 @@ function SidebarStatus() {
           const shown = () => all().slice(0, settings().maxFiles);
           const more = () => all().length - shown().length;
           return (() => {
-            var _el$3 = _$createElement("box"), _el$6 = _$createElement("text"), _el$7 = _$createTextNode(`Config `);
-            _$insertNode(_el$3, _el$6);
-            _$setProp(_el$3, "flexDirection", "column");
-            _$insert(_el$3, _$createComponent(Show, {
+            var _el$3 = _$createElement2("box"), _el$6 = _$createElement2("text"), _el$7 = _$createTextNode2(`Config `);
+            _$insertNode2(_el$3, _el$6);
+            _$setProp2(_el$3, "flexDirection", "column");
+            _$insert2(_el$3, _$createComponent2(Show, {
               get when() {
                 return status().outdated;
               },
               get children() {
-                var _el$4 = _$createElement("text");
-                _$insertNode(_el$4, _$createTextNode(`\u2757 OUTDATED!`));
-                _$effect((_$p) => _$setProp(_el$4, "fg", context.theme.text.feedback.error.base, _$p));
+                var _el$4 = _$createElement2("text");
+                _$insertNode2(_el$4, _$createTextNode2(`\u2757 OUTDATED!`));
+                _$effect2((_$p) => _$setProp2(_el$4, "fg", context.theme.text.feedback.error.base, _$p));
                 return _el$4;
               }
             }), _el$6);
-            _$insertNode(_el$6, _el$7);
-            _$insert(_el$6, (() => {
+            _$insertNode2(_el$6, _el$7);
+            _$insert2(_el$6, (() => {
               var _c$ = _$memo(() => !!(status().ahead || status().behind));
               return () => _c$() ? `\u2191${status().ahead} to push \xB7 \u2193${status().behind} to pull` : _$memo(() => !!(status().files.length || status().dirtySubmodules.length || status().unpushedSubmodules.length))() ? status().files.length === 0 && (status().dirtySubmodules.length > 0 || status().unpushedSubmodules.length > 0) ? "needs some love \u2764\uFE0F" : "" : "in sync \u2713";
             })(), null);
-            _$insert(_el$3, _$createComponent(Show, {
+            _$insert2(_el$3, _$createComponent2(Show, {
               get when() {
                 return status().files.length;
               },
               get children() {
-                var _el$8 = _$createElement("text");
-                _$insert(_el$8, () => `${status().files.length} uncommitted`);
-                _$effect((_$p) => _$setProp(_el$8, "fg", context.theme.text.muted, _$p));
+                var _el$8 = _$createElement2("text");
+                _$insert2(_el$8, () => `${status().files.length} uncommitted`);
+                _$effect2((_$p) => _$setProp2(_el$8, "fg", context.theme.text.muted, _$p));
                 return _el$8;
               }
             }), null);
-            _$insert(_el$3, _$createComponent(For, {
+            _$insert2(_el$3, _$createComponent2(For2, {
               get each() {
                 return shown();
               },
               children: (row) => (() => {
-                var _el$0 = _$createElement("text");
-                _$insert(_el$0, () => row.text);
-                _$effect((_$p) => _$setProp(_el$0, "fg", row.warn ? context.theme.text.feedback.error.base : context.theme.text.muted, _$p));
+                var _el$0 = _$createElement2("text");
+                _$insert2(_el$0, () => row.text);
+                _$effect2((_$p) => _$setProp2(_el$0, "fg", row.warn ? context.theme.text.feedback.error.base : context.theme.text.muted, _$p));
                 return _el$0;
               })()
             }), null);
-            _$insert(_el$3, _$createComponent(Show, {
+            _$insert2(_el$3, _$createComponent2(Show, {
               get when() {
                 return more() > 0;
               },
               get children() {
-                var _el$9 = _$createElement("text");
-                _$insert(_el$9, () => `  \u2026 ${plural(more(), "more file")} changed`);
-                _$effect((_$p) => _$setProp(_el$9, "fg", context.theme.text.muted, _$p));
+                var _el$9 = _$createElement2("text");
+                _$insert2(_el$9, () => `  \u2026 ${plural(more(), "more file")} changed`);
+                _$effect2((_$p) => _$setProp2(_el$9, "fg", context.theme.text.muted, _$p));
                 return _el$9;
               }
             }), null);
-            _$effect((_$p) => _$setProp(_el$6, "fg", context.theme.text.base, _$p));
+            _$effect2((_$p) => _$setProp2(_el$6, "fg", context.theme.text.base, _$p));
             return _el$3;
           })();
         }
-      }), _$createComponent(Match, {
+      }), _$createComponent2(Match, {
         get when() {
           return view();
         },
         children: (current) => (() => {
-          var _el$1 = _$createElement("text");
-          _$insert(_el$1, () => current().state === "no-repo" ? "Config not in git \xB7 /config-sync-setup" : "Config repo has no upstream");
-          _$effect((_$p) => _$setProp(_el$1, "fg", context.theme.text.muted, _$p));
+          var _el$1 = _$createElement2("text");
+          _$insert2(_el$1, () => current().state === "no-repo" ? "Config not in git \xB7 /config-sync-setup" : "Config repo has no upstream");
+          _$effect2((_$p) => _$setProp2(_el$1, "fg", context.theme.text.muted, _$p));
           return _el$1;
         })()
       })];
@@ -600,9 +838,46 @@ var tui_default = Plugin.define({
     };
     const failed = (title, error) => context.ui.toast.show({
       title,
-      message: `${error.message} (click to dismiss)`,
+      message: `${printable(error.message, true)} (click to dismiss)`,
       variant: "error",
       duration: STICKY_MS
+    });
+    const confirmSecrets = async (found) => await context.ui.dialog.select({
+      title: "\u26A0\uFE0F Possible secrets in the staged files",
+      options: [{
+        title: "Cancel",
+        value: "cancel",
+        description: "Review the files first; add them to .gitignore or use {env:\u2026}"
+      }, {
+        title: "Ignore and continue",
+        value: "ignore",
+        description: "Commit and push them anyway"
+      }, ...found.map((entry) => ({
+        title: `  ${printable(entry)}`,
+        value: "cancel",
+        disabled: true
+      }))]
+    }) === "ignore";
+    const commitMessage = (description, value) => new Promise((resolve) => {
+      let settled = false;
+      const settle = (message) => {
+        if (settled)
+          return false;
+        settled = true;
+        resolve(message);
+        return true;
+      };
+      const done = (message) => {
+        if (settle(message))
+          context.ui.dialog.clear();
+      };
+      context.ui.dialog.show(() => _$createComponent2(CommitDialog, {
+        title: "Commit config changes",
+        description,
+        value,
+        onCommit: done,
+        onCancel: () => done(undefined)
+      }), () => settle(undefined));
     });
     const exclusive = async (task) => {
       if (busy)
@@ -633,7 +908,7 @@ var tui_default = Plugin.define({
             options: [{
               title: "Ignore and sync the rest",
               value: "ignore",
-              description: `Leaves the work in ${status.dirtySubmodules.join(", ")} uncommitted`
+              description: `Leaves the work in ${printable(status.dirtySubmodules.join(", "))} uncommitted`
             }, {
               title: "Cancel",
               value: "cancel",
@@ -649,12 +924,14 @@ var tui_default = Plugin.define({
         let message;
         if (status.files.length) {
           await stageAll(repo);
+          const found = await stagedSecrets(repo);
+          if (found.length && !await confirmSecrets(found))
+            return context.ui.toast.show({
+              message: "Config sync cancelled; the changes stay staged",
+              variant: "info"
+            });
           const staged = await readStatus(repo, staleMs, fetchMs);
-          message = (await context.ui.dialog.prompt({
-            title: "Commit config changes",
-            description: `${plural(staged.files.length, "staged file")} will be committed.`,
-            value: proposeMessage(staged.files)
-          }))?.trim();
+          message = (await commitMessage(`${plural(staged.files.length, "staged file")} will be committed.`, proposeMessage(staged.files)))?.trim();
           if (!message)
             return context.ui.toast.show({
               message: "Config sync cancelled; the changes stay staged",
@@ -729,7 +1006,11 @@ var tui_default = Plugin.define({
         if (!url)
           return;
         if (mode === "new") {
-          await setupNew(repo, url, "initial import");
+          if (!await setupNew(repo, url, "initial import", confirmSecrets))
+            return context.ui.toast.show({
+              message: "Config sync setup cancelled; nothing was changed",
+              variant: "info"
+            });
           context.ui.toast.show({
             title: "Config sync",
             message: "Config pushed to the new repo \u2713",
@@ -750,11 +1031,11 @@ var tui_default = Plugin.define({
     };
     context.ui.slot({
       append: "prompt.footer.status",
-      render: () => _$createComponent(FooterStatus, {})
+      render: () => _$createComponent2(FooterStatus, {})
     });
     context.ui.slot({
       append: "sidebar.content",
-      render: () => _$createComponent(SidebarStatus, {})
+      render: () => _$createComponent2(SidebarStatus, {})
     });
     context.keymap.layer(() => ({
       mode: "global",

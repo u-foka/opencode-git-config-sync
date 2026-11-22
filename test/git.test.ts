@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { DAY_MS, fresh, otherMachine, run, syncedRepo, withSubmodule, write, useScratchRepos } from "./helpers"
-import { configDir, git, proposeMessage, readStatus, repoState, setupExisting, setupNew, stageAll, sync, type ChangedFile } from "../src/git"
+import { configDir, git, printable, proposeMessage, readStatus, redact, repoState, setupExisting, setupNew, stageAll, stagedSecrets, sync, unsafePath, type ChangedFile } from "../src/git"
 
 useScratchRepos()
 
@@ -450,6 +450,136 @@ describe("setupExisting", () => {
     await expect(setupExisting(repo, remote)).rejects.toThrow(/setup undone/)
     expect(readdirSync(repo).sort()).toEqual(["a.txt", "sub"])
     expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("local\n")
+    expect(await repoState(repo)).toBe("no-repo")
+  })
+})
+
+describe("hardening", () => {
+  test("redact hides credentials in URLs", () => {
+    expect(redact("fatal: https://user:pw@host/x.git and https://TOKEN@host/y")).toBe(
+      "fatal: https://***@host/x.git and https://***@host/y",
+    )
+    expect(redact("ssh://git:secret@host/x")).toBe("ssh://git:***@host/x")
+    expect(redact("ssh://git@host/x and git@host:x.git")).toBe("ssh://git@host/x and git@host:x.git")
+  })
+
+  test("printable replaces control characters", () => {
+    expect(printable("a\x1b[31mb\nc\t")).toBe("a�[31mb�c�")
+    expect(printable("a\x1bb\nc\td", true)).toBe("a�b\nc\td")
+  })
+
+  test("unsafePath rejects paths that leave the folder or touch .git", () => {
+    for (const path of ["../x", "a/../../x", "/etc/passwd", "C:/x", "a//b", "./a", ".git/config", "a/.GIT/hooks/x"])
+      expect(unsafePath(path)).toBe(true)
+    for (const path of ["opencode.json", "skills/a.md", ".gitignore", "a..b/c"]) expect(unsafePath(path)).toBe(false)
+  })
+
+  test("a remote URL that looks like an option is not run as one", async () => {
+    const dir = fresh("option-url")
+    const repo = join(dir, "config")
+    write(join(repo, "cli.json"), "{}\n")
+    const marker = join(dir, "pwned")
+    await expect(setupNew(repo, `--upload-pack=touch ${marker}`, "initial import")).rejects.toThrow()
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(join(repo, ".git"))).toBe(false)
+  })
+})
+
+describe("stagedSecrets", () => {
+  const staged = async (files: Record<string, string>) => {
+    const { repo } = syncedRepo()
+    for (const [path, text] of Object.entries(files)) write(join(repo, path), text)
+    await stageAll(repo)
+    return stagedSecrets(repo)
+  }
+
+  test("flags secret-looking file names", async () => {
+    expect((await staged({ ".env": "X=1\n", "certs/server.key": "k\n", "id_ed25519": "k\n", "a.md": "x\n" })).sort()).toEqual([
+      ".env (env file)",
+      "certs/server.key (key file)",
+      "id_ed25519 (SSH key)",
+    ])
+  })
+
+  test("flags tokens, private keys and literal secret values in added lines", async () => {
+    const found = await staged({
+      "opencode.json": '{\n  "provider": { "x": { "options": { "apiKey": "abc123secret" } } }\n}\n',
+      "mcp.json": '{ "headers": { "authToken": "zzzzzzzz" } }\n',
+      "db.env.example": "DB_PASSWORD=hunter22\n",
+      "notes.md": "ghp_abcdefghijklmnopqrstuvwxyz0123\n",
+      "pem.txt": "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+      "proxy.yaml": "pass: s3cret\n",
+    })
+    expect(found.sort()).toEqual([
+      "db.env.example (DB_PASSWORD value)",
+      "mcp.json (authToken value)",
+      "notes.md (token)",
+      "opencode.json (apiKey value)",
+      "pem.txt (private key)",
+      "proxy.yaml (pass value)",
+    ])
+  })
+
+  test("ignores references, placeholders and harmless keys", async () => {
+    expect(
+      await staged({
+        "opencode.json":
+          '{ "apiKey": "{env:OPENAI_API_KEY}", "token": "{file:~/.secret}", "maxTokens": 4096, "password": "", "secret": true }\n',
+        "a.env.md": "API_TOKEN=$TOKEN\nTOKEN=<your token>\nbypass: on\n",
+      }),
+    ).toEqual([])
+  })
+
+  test("only looks at added lines", async () => {
+    const { repo } = syncedRepo({ "a.json": '{ "apiKey": "abc123secret" }\n' })
+    write(join(repo, "a.json"), "{}\n")
+    await stageAll(repo)
+    expect(await stagedSecrets(repo)).toEqual([])
+  })
+})
+
+describe("setup with secrets", () => {
+  test("setupNew asks before committing secrets, and undoes everything when declined", async () => {
+    const dir = fresh("new")
+    const remote = join(dir, "remote.git")
+    const repo = join(dir, "config")
+    run(dir, "init", "-q", "--bare", remote)
+    write(join(repo, "opencode.json"), '{ "apiKey": "abc123secret" }\n')
+    const asked: string[][] = []
+
+    expect(await setupNew(repo, remote, "initial import", async (found) => (asked.push(found), false))).toBe(false)
+    expect(asked).toEqual([["opencode.json (apiKey value)"]])
+    expect(readdirSync(repo)).toEqual(["opencode.json"])
+    expect(run(remote, "rev-list", "--all").trim()).toBe("")
+
+    expect(await setupNew(repo, remote, "initial import", async () => true)).toBe(true)
+    expect(await repoState(repo)).toBe("ready")
+  })
+
+  test("setupExisting refuses to move files through a symlink that leaves the folder", async () => {
+    const { dir, remote } = syncedRepo({ "skills/a.md": "remote\n" })
+    const outside = join(dir, "outside")
+    write(join(outside, "a.md"), "precious\n")
+    const repo = join(dir, "machine")
+    mkdirSync(repo, { recursive: true })
+    symlinkSync(outside, join(repo, "skills"))
+
+    await expect(setupExisting(repo, remote)).rejects.toThrow(/symbolic link.*setup undone/)
+    expect(readFileSync(join(outside, "a.md"), "utf8")).toBe("precious\n")
+    expect(readdirSync(outside)).toEqual(["a.md"])
+    expect(await repoState(repo)).toBe("no-repo")
+  })
+
+  test("setupExisting rejects a remote tree with an unsafe path", async () => {
+    const { dir, remote, repo: first } = syncedRepo()
+    const evil = execFileSync("git", ["hash-object", "-w", "--stdin"], { cwd: first, input: "evil\n", encoding: "utf8" }).trim()
+    const tree = execFileSync("git", ["mktree"], { cwd: first, input: `100644 blob ${evil}\t..\n`, encoding: "utf8" }).trim()
+    const commit = run(first, "commit-tree", tree, "-m", "evil").trim()
+    run(first, "push", "-q", "--force", "origin", `${commit}:refs/heads/master`)
+    const repo = join(dir, "machine")
+    mkdirSync(repo, { recursive: true })
+
+    await expect(setupExisting(repo, remote)).rejects.toThrow(/setup undone/)
     expect(await repoState(repo)).toBe("no-repo")
   })
 })

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process"
-import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
+import { appendFile, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join, sep } from "node:path"
 
 export interface ChangedFile {
   readonly code: string
@@ -31,6 +31,12 @@ export const DEFAULT_GITIGNORE = `node_modules/
 
 # local service credentials
 service.json
+
+# secrets
+.env
+.env.*
+*.pem
+*.key
 
 # machine-specific overrides
 *.local.json
@@ -63,7 +69,7 @@ export function git(
       },
       (error, stdout, stderr) =>
         error
-          ? fail(new Error(error.killed ? `git ${args[0]} timed out` : (stderr || error.message).trim()))
+          ? fail(new Error(error.killed ? `git ${args[0]} timed out` : redact((stderr || error.message).trim())))
           : done(stdout),
     ),
   )
@@ -93,6 +99,71 @@ const age = async (path: string) => {
 }
 
 const exists = async (path: string) => (await age(path)) !== undefined
+
+/** Hides credentials in URLs: any user info of http(s) URLs (often a bare token), and the password elsewhere. */
+export const redact = (text: string) =>
+  text.replace(/(https?:\/\/)[^/@\s]+@/gi, "$1***@").replace(/(\w+:\/\/[^/@:\s]*):[^/@\s]+@/g, "$1:***@")
+
+/** Replaces control characters (terminal escapes included), so text from git or the remote can't restyle the TUI. */
+export const printable = (text: string, keepLines = false) =>
+  text.replace(keepLines ? /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g : /[\x00-\x1f\x7f-\x9f]/g, "�")
+
+const SECRET_FILES: readonly [RegExp, string][] = [
+  [/^\.env(\..+)?$/, "env file"],
+  [/\.(pem|key|p12|pfx)$/i, "key file"],
+  [/^id_(rsa|dsa|ecdsa|ed25519)$/, "SSH key"],
+  [/^auth\.json$/, "credentials file"],
+]
+
+const SECRET_TEXT: readonly [RegExp, string][] = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, "private key"],
+  [/\b(sk-[\w-]{20,}|gh[pousr]_\w{20,}|github_pat_\w{20,}|glpat-[\w-]{20,}|xox[abprs]-[\w-]{10,}|AKIA[0-9A-Z]{16})/, "token"],
+]
+
+// `"apiKey": "…"`, `token: …`, `DB_PASSWORD=…` and the like, set to a literal rather than a {env:…}/{file:…} reference.
+const ASSIGNMENT = /["']?([\w.-]+)["']?\s*[:=]\s*["']?([^"'\s,}]+)/g
+const SECRET_KEY = [/(^|[_.-])(api[_-]?key|token|secret|pass|passwd|password)$/i, /[a-z](ApiKey|Token|Secret|Pass|Passwd|Password)$/]
+const PLACEHOLDER = /^(\{(env|file):|\$|<|true$|false$|null$|\d+$)/
+
+function secretInLine(line: string): string | undefined {
+  for (const [pattern, reason] of SECRET_TEXT) if (pattern.test(line)) return reason
+  for (const [, key, value] of line.matchAll(ASSIGNMENT))
+    if (SECRET_KEY.some((pattern) => pattern.test(key)) && !PLACEHOLDER.test(value)) return `${key} value`
+  return undefined
+}
+
+/** Staged files that look like they hold a secret, by file name or by an added line, as "path (reason)". */
+export async function stagedSecrets(repo: string): Promise<string[]> {
+  const found = new Set<string>()
+  const names = await git(repo, ["diff", "--cached", "--name-only", "--diff-filter=d", "--no-renames", "-z"])
+  for (const path of names.split("\0").filter(Boolean))
+    for (const [pattern, reason] of SECRET_FILES) if (pattern.test(basename(path))) found.add(`${path} (${reason})`)
+  const diff = await git(repo, ["-c", "core.quotePath=false", "diff", "--cached", "--no-renames", "--no-color", "--no-ext-diff", "-U0"])
+  let path = ""
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++ ")) path = line.slice(4).replace(/^b\//, "")
+    else if (line.startsWith("+")) {
+      const reason = secretInLine(line.slice(1))
+      if (reason) found.add(`${path} (${reason})`)
+    }
+  }
+  return [...found]
+}
+
+// Remote paths become file system paths during setup, before git's own checkout checks run.
+export function unsafePath(path: string) {
+  const parts = path.split(process.platform === "win32" ? /[\\/]/ : "/")
+  return (
+    path.startsWith("/") ||
+    /^[a-z]:/i.test(path) ||
+    parts.some((part) => part === "" || part === "." || part === ".." || part.toLowerCase() === ".git")
+  )
+}
+
+async function insideRepo(repo: string, path: string) {
+  const [root, parent] = await Promise.all([realpath(repo), realpath(dirname(path))])
+  return parent === root || parent.startsWith(root + sep)
+}
 
 /** The global opencode config directory, resolved the same way opencode does (XDG paths on every OS). */
 export function configDir(override?: string): string {
@@ -303,12 +374,12 @@ export async function fetchRepo(repo: string): Promise<{ before: number; after: 
 }
 
 async function remoteBranch(repo: string, url: string): Promise<string | undefined> {
-  const heads = (await git(repo, ["ls-remote", "--heads", url]))
+  const heads = (await git(repo, ["ls-remote", "--heads", "--end-of-options", url]))
     .split("\n")
     .map((line) => line.split("\trefs/heads/")[1])
     .filter((name): name is string => !!name)
   if (!heads.length) return undefined
-  const symref = (await git(repo, ["ls-remote", "--symref", url, "HEAD"])).match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1]
+  const symref = (await git(repo, ["ls-remote", "--symref", "--end-of-options", url, "HEAD"])).match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1]
   return [symref, "main", "master"].find((name) => name && heads.includes(name)) ?? heads[0]
 }
 
@@ -333,24 +404,36 @@ async function undoSetup(repo: string, error: unknown, undo: () => Promise<void>
   throw new Error(`${message} (setup undone, the config folder is as before)`)
 }
 
-/** First machine: turn the config dir into a repo and push it to an empty remote. */
-export async function setupNew(repo: string, url: string, message: string) {
+/** First machine: turn the config dir into a repo and push it to an empty remote. Returns false when cancelled. */
+export async function setupNew(
+  repo: string,
+  url: string,
+  message: string,
+  confirmSecrets: (found: string[]) => Promise<boolean> = async () => true,
+): Promise<boolean> {
   if ((await repoState(repo)) !== "no-repo") throw new Error("Config directory is already a git repository")
   if (await remoteBranch(repo, url)) throw new Error("Remote is not empty; use “Pull existing config” instead")
   const gitignore = join(repo, ".gitignore")
   const originalGitignore = await readFile(gitignore, "utf8").catch(() => undefined)
+  const restoreGitignore = () =>
+    originalGitignore === undefined ? rm(gitignore, { force: true }) : writeFile(gitignore, originalGitignore)
   try {
     await git(repo, ["init", "--quiet"])
     await ensureGitignore(repo)
     await git(repo, ["add", "--all"])
+    const found = await stagedSecrets(repo)
+    if (found.length && !(await confirmSecrets(found))) {
+      await restoreGitignore()
+      await rm(join(repo, ".git"), { recursive: true, force: true })
+      return false
+    }
     await git(repo, ["commit", "--quiet", "-m", message])
-    await git(repo, ["remote", "add", "origin", url])
+    await git(repo, ["remote", "add", "--end-of-options", "origin", url])
     await git(repo, ["push", "--quiet", "-u", "origin", "HEAD"])
   } catch (error) {
-    await undoSetup(repo, error, () =>
-      originalGitignore === undefined ? rm(gitignore, { force: true }) : writeFile(gitignore, originalGitignore),
-    )
+    await undoSetup(repo, error, restoreGitignore)
   }
+  return true
 }
 
 /** Another machine: adopt the remote config, moving clashing local files to a backup folder first. */
@@ -363,12 +446,17 @@ export async function setupExisting(repo: string, url: string): Promise<{ backup
   const moved: string[] = []
   try {
     await git(repo, ["init", "--quiet", `--initial-branch=${branch}`])
-    await git(repo, ["remote", "add", "origin", url])
-    await git(repo, ["fetch", "--quiet", "origin"])
+    await git(repo, ["remote", "add", "--end-of-options", "origin", url])
+    await git(repo, ["-c", "transfer.fsckObjects=true", "fetch", "--quiet", "origin"])
 
     const remoteFiles = (await git(repo, ["ls-tree", "-r", "-z", "--name-only", `origin/${branch}`])).split("\0").filter(Boolean)
+    const unsafe = remoteFiles.find(unsafePath)
+    if (unsafe) throw new Error(`Remote has an unsafe path: ${unsafe}`)
     const clashing: string[] = []
-    for (const path of remoteFiles) if (await exists(join(repo, path))) clashing.push(path)
+    for (const path of remoteFiles) if (await lstat(join(repo, path)).then(() => true, () => false)) clashing.push(path)
+    for (const path of clashing)
+      if (!(await insideRepo(repo, join(repo, path))))
+        throw new Error(`${path} is behind a symbolic link that leaves the config folder`)
 
     if (clashing.length) {
       backup = `.config-sync-backup-${new Date().toISOString().replace(/[:.]/g, "-")}`

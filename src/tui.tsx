@@ -5,18 +5,21 @@ import { createSignal, For, Match, Show, Switch } from "solid-js"
 import {
   configDir,
   fetchRepo,
+  printable,
   proposeMessage,
   readStatus,
   repoState,
   setupExisting,
   setupNew,
   stageAll,
+  stagedSecrets,
   sync,
   unpushedMessage,
   type ChangedFile,
   type RepoState,
   type SyncStatus,
 } from "./git"
+import { CommitDialog } from "./commit-dialog"
 
 const HOUR_MS = 60 * 60 * 1000
 const STICKY_MS = 2_147_483_647
@@ -62,13 +65,13 @@ function rows(status: SyncStatus): Row[] {
   const extra = [...new Set([...status.dirtySubmodules, ...status.unpushedSubmodules])].filter((path) => !listed.has(path))
   return [
     ...status.files.map((file) => ({
-      text: `  ${file.code.padEnd(2)} ${file.path} ${lineCounts(file)}`.trimEnd() + note(file.path),
+      text: `  ${file.code.padEnd(2)} ${printable(file.path)} ${lineCounts(file)}`.trimEnd() + note(file.path),
       warn: dirty.has(file.path) || unpushed.has(file.path),
     })),
     // A committed pointer to an unpushed commit is one push away from breaking the submodule update on the other
     // machines. ❗ is two cells wide and replaces the indent, so the row stays aligned with the others.
     ...extra.map((path) => ({
-      text: `${unpushed.has(path) ? "❗" : "  "}${dirty.has(path) ? "m " : "↑ "} ${path}${note(path)}`,
+      text: `${unpushed.has(path) ? "❗" : "  "}${dirty.has(path) ? "m " : "↑ "} ${printable(path)}${note(path)}`,
       warn: true,
     })),
   ]
@@ -240,9 +243,47 @@ export default Plugin.define({
     const failed = (title: string, error: unknown) =>
       context.ui.toast.show({
         title,
-        message: `${(error as Error).message} (click to dismiss)`,
+        message: `${printable((error as Error).message, true)} (click to dismiss)`,
         variant: "error",
         duration: STICKY_MS,
+      })
+
+    // Cancel comes first, so it is the focused choice; only an explicit "Ignore" goes on.
+    const confirmSecrets = async (found: readonly string[]) =>
+      (await context.ui.dialog.select({
+        title: "⚠️ Possible secrets in the staged files",
+        options: [
+          { title: "Cancel", value: "cancel", description: "Review the files first; add them to .gitignore or use {env:…}" },
+          { title: "Ignore and continue", value: "ignore", description: "Commit and push them anyway" },
+          ...found.map((entry) => ({ title: `  ${printable(entry)}`, value: "cancel", disabled: true })),
+        ],
+      })) === "ignore"
+
+    const commitMessage = (description: string, value: string) =>
+      new Promise<string | undefined>((resolve) => {
+        let settled = false
+        const settle = (message: string | undefined) => {
+          if (settled) return false
+          settled = true
+          resolve(message)
+          return true
+        }
+        // The host closes the dialog itself on Esc (the onClose callback); the buttons close it here.
+        const done = (message: string | undefined) => {
+          if (settle(message)) context.ui.dialog.clear()
+        }
+        context.ui.dialog.show(
+          () => (
+            <CommitDialog
+              title="Commit config changes"
+              description={description}
+              value={value}
+              onCommit={done}
+              onCancel={() => done(undefined)}
+            />
+          ),
+          () => settle(undefined),
+        )
       })
 
     const exclusive = async (task: () => Promise<void>) => {
@@ -273,7 +314,7 @@ export default Plugin.define({
                 {
                   title: "Ignore and sync the rest",
                   value: "ignore",
-                  description: `Leaves the work in ${status.dirtySubmodules.join(", ")} uncommitted`,
+                  description: `Leaves the work in ${printable(status.dirtySubmodules.join(", "))} uncommitted`,
                 },
                 { title: "Cancel", value: "cancel", description: "Commit or discard the submodule work first" },
               ],
@@ -283,13 +324,12 @@ export default Plugin.define({
           let message: string | undefined
           if (status.files.length) {
             await stageAll(repo)
+            const found = await stagedSecrets(repo)
+            if (found.length && !(await confirmSecrets(found)))
+              return context.ui.toast.show({ message: "Config sync cancelled; the changes stay staged", variant: "info" })
             const staged = await readStatus(repo, staleMs, fetchMs)
             message = (
-              await context.ui.dialog.prompt({
-                title: "Commit config changes",
-                description: `${plural(staged.files.length, "staged file")} will be committed.`,
-                value: proposeMessage(staged.files),
-              })
+              await commitMessage(`${plural(staged.files.length, "staged file")} will be committed.`, proposeMessage(staged.files))
             )?.trim()
             if (!message)
               return context.ui.toast.show({ message: "Config sync cancelled; the changes stay staged", variant: "info" })
@@ -355,7 +395,8 @@ export default Plugin.define({
         )?.trim()
         if (!url) return
         if (mode === "new") {
-          await setupNew(repo, url, "initial import")
+          if (!(await setupNew(repo, url, "initial import", confirmSecrets)))
+            return context.ui.toast.show({ message: "Config sync setup cancelled; nothing was changed", variant: "info" })
           context.ui.toast.show({ title: "Config sync", message: "Config pushed to the new repo ✓", variant: "success" })
           return
         }

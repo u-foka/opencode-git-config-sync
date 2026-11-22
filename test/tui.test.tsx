@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
+import { readdirSync } from "node:fs"
 import { join } from "node:path"
 import { Plugin, PluginContextProvider } from "@opencode/plugin/tui"
-import { RGBA } from "@opentui/core"
+import { RGBA, TextareaRenderable, type Renderable } from "@opentui/core"
 import { testRender } from "@opentui/solid"
 import type { JSX } from "solid-js"
 import plugin from "../src/tui"
@@ -19,23 +20,55 @@ interface Toast {
 }
 
 interface Command {
-  readonly id: string
+  readonly id?: string
+  readonly bind?: string
+  readonly enabled?: () => boolean
   readonly run: () => unknown
 }
 
-/** Answers the plugin's dialogs in order: a select gets a value, a prompt gets text (undefined = dismissed). */
+/** Answers the plugin's dialogs in order: a select gets a value, a prompt or the commit dialog gets text (undefined = dismissed). */
 type Answer = string | undefined
+
+const THEME = {
+  text: {
+    base: COLORS.base,
+    muted: COLORS.muted,
+    feedback: { error: { base: COLORS.error } },
+    formfield: { base: COLORS.base },
+    action: { primary: { focused: COLORS.base } },
+  },
+  background: { formfield: { base: "#000000" }, action: { primary: { focused: "#0000ff" } } },
+  surface: () => THEME,
+}
+
+function findTextarea(item: Renderable): TextareaRenderable | undefined {
+  if (item instanceof TextareaRenderable) return item
+  for (const child of item.getChildren()) {
+    const found = findTextarea(child as Renderable)
+    if (found) return found
+  }
+  return undefined
+}
 
 /** Runs the plugin's setup against `repo` with a fake opencode context that records what the plugin does. */
 async function start(repo: string, options: Record<string, unknown> = {}, answers: Answer[] = []) {
   const slots = new Map<string, () => JSX.Element>()
   const toasts: Toast[] = []
   const prompts: { title: string; description?: string; value?: string }[] = []
+  /** The commit dialog's first frame, each time it opens. */
+  const commits: string[] = []
+  const selects: { title: string; options: { title: string; value: string; disabled?: boolean }[] }[] = []
   let commands: Command[] = []
+  let modal: Command[] = []
+  const press = (key: string) => {
+    const found = modal.find((entry) => entry.bind === key && (entry.enabled?.() ?? true))
+    if (!found) throw new Error(`no active ${key} binding`)
+    return found.run()
+  }
   const reminders = { outdated: 0, setup: 0 }
   const context = {
     options: { repo, ...options },
-    theme: { text: { base: COLORS.base, muted: COLORS.muted, feedback: { error: { base: COLORS.error } } } },
+    theme: THEME,
     storage: {
       store: () => [reminders, async (update: (draft: typeof reminders) => void) => update(reminders)],
     },
@@ -43,14 +76,40 @@ async function start(repo: string, options: Record<string, unknown> = {}, answer
       slot: (slot: { append: string; render: () => JSX.Element }) => slots.set(slot.append, slot.render),
       toast: { show: (toast: Toast) => toasts.push(toast) },
       dialog: {
-        select: async () => answers.shift(),
+        select: async (select: (typeof selects)[number]) => {
+          selects.push(select)
+          return answers.shift()
+        },
+        show: (view: () => JSX.Element, onClose: () => void) => {
+          void (async () => {
+            const setup = await testRender(() => <PluginContextProvider value={context}>{view()}</PluginContextProvider>, {
+              width: 100,
+              height: 20,
+            })
+            cleanups.push(async () => setup.dispose())
+            await setup.renderOnce()
+            commits.push(setup.captureCharFrame())
+            const answer = answers.shift()
+            if (answer === undefined) return onClose()
+            findTextarea(setup.renderer.root)!.setText(answer)
+            press("ctrl+s")
+          })()
+        },
+        set: () => {},
+        clear: () => {},
         prompt: async (prompt: { title: string; description?: string; value?: string }) => {
           prompts.push(prompt)
           return answers.shift()
         },
       },
     },
-    keymap: { layer: (layer: () => { commands: Command[] }) => (commands = layer().commands) },
+    keymap: {
+      layer: (layer: () => { mode?: string; commands: Command[] }) => {
+        const current = layer()
+        if (current.mode === "modal") modal = current.commands
+        else commands = current.commands
+      },
+    },
     data: { on: () => () => {} },
   } as unknown as Plugin.Context
 
@@ -74,7 +133,7 @@ async function start(repo: string, options: Record<string, unknown> = {}, answer
     if (!found) throw new Error(`no command ${id}`)
     return found.run()
   }
-  return { render, toasts, prompts, command }
+  return { render, toasts, prompts, commits, selects, command, press }
 }
 
 const cleanups: (() => Promise<void>)[] = []
@@ -197,6 +256,15 @@ describe("sidebar", () => {
     expect(toasts.map((toast) => toast.variant)).toContain("warning")
   })
 
+  test("shows control characters in file names as placeholders", async () => {
+    const { repo } = syncedRepo()
+    write(join(repo, "a\x1b[31mb.md"), "x\n")
+    const { render } = await start(repo)
+    const sidebar = await render("sidebar.content")
+    const frame = await settle(sidebar, "[31mb.md")
+    expect(frame).toContain("?? a�[31mb.md +1")
+  })
+
   test("suggests setup when the folder is not a repository", async () => {
     const { render, toasts } = await start(fresh("plain"))
     const sidebar = await render("sidebar.content")
@@ -267,6 +335,22 @@ describe("/config-sync-setup", () => {
   })
 })
 
+describe("/config-sync-setup secrets", () => {
+  test("cancelling the secrets warning leaves the folder as it was", async () => {
+    const dir = fresh("setup")
+    const remote = join(dir, "remote.git")
+    const repo = join(dir, "config")
+    run(dir, "init", "-q", "--bare", remote)
+    write(join(repo, "opencode.json"), '{ "apiKey": "abc123secret" }\n')
+    const { command, selects, toasts } = await start(repo, {}, ["new", remote, "cancel"])
+
+    await command("config-sync.setup")
+    expect(selects.at(-1)?.options.map((option) => option.title)).toContain("  opencode.json (apiKey value)")
+    expect(toasts.at(-1)?.message).toBe("Config sync setup cancelled; nothing was changed")
+    expect(readdirSync(repo)).toEqual(["opencode.json"])
+  })
+})
+
 describe("/config-sync-refresh", () => {
   test("says so when a status check is already running", async () => {
     const { command, toasts } = await start(syncedRepo().repo)
@@ -291,11 +375,13 @@ describe("/config-sync", () => {
   test("stages before the prompt and commits with the confirmed message", async () => {
     const { repo, remote } = syncedRepo()
     write(join(repo, "a.md"), "x\n")
-    const { command, prompts, toasts } = await start(repo, {}, ["my message"])
+    const { command, commits, toasts } = await start(repo, {}, ["my message\n\nwith a body\n"])
 
     await command("config-sync.sync")
-    expect(prompts[0]).toMatchObject({ description: "1 staged file will be committed.", value: "add a.md" })
-    expect(run(remote, "log", "-1", "--format=%s").trim()).toBe("my message")
+    expect(commits[0]).toContain("Commit config changes")
+    expect(commits[0]).toContain("1 staged file will be committed.")
+    expect(commits[0]).toContain("add a.md")
+    expect(run(remote, "log", "-1", "--format=%B").trim()).toBe("my message\n\nwith a body")
     expect(toasts.at(-1)).toMatchObject({ variant: "success" })
   })
 
@@ -315,10 +401,10 @@ describe("/config-sync", () => {
     const sub = withSubmodule(dir, repo)
     write(join(sub, "draft.ts"), "wip\n")
     write(join(repo, "a.md"), "x\n")
-    const { command, prompts, toasts } = await start(repo, {}, ["cancel"])
+    const { command, commits, toasts } = await start(repo, {}, ["cancel"])
 
     await command("config-sync.sync")
-    expect(prompts).toEqual([])
+    expect(commits).toEqual([])
     expect(run(repo, "diff", "--cached", "--name-only").trim()).toBe("")
     expect(toasts.at(-1)?.message).toBe("Config sync cancelled")
   })
@@ -339,10 +425,10 @@ describe("/config-sync", () => {
     const sub = withSubmodule(dir, repo)
     run(sub, "commit", "-q", "--allow-empty", "-m", "bump")
     write(join(repo, "a.md"), "x\n")
-    const { command, prompts, toasts } = await start(repo, {}, ["message"])
+    const { command, commits, toasts } = await start(repo, {}, ["message"])
 
     await command("config-sync.sync")
-    expect(prompts).toEqual([])
+    expect(commits).toEqual([])
     expect(run(repo, "diff", "--cached", "--name-only").trim()).toBe("")
     expect(run(remote, "log", "-1", "--format=%s").trim()).toBe("add submodule")
     expect(toasts.at(-1)).toMatchObject({
@@ -350,6 +436,34 @@ describe("/config-sync", () => {
       variant: "error",
       message: "plugins/x has commits that are not pushed; push the submodule first (click to dismiss)",
     })
+  })
+
+  test("warns about possible secrets, with Cancel first, and keeps them staged when cancelled", async () => {
+    const { repo, remote } = syncedRepo()
+    write(join(repo, "opencode.json"), '{ "password": "hunter22" }\n')
+    const { command, commits, selects, toasts } = await start(repo, {}, ["cancel"])
+
+    await command("config-sync.sync")
+    expect(selects[0].title).toContain("Possible secrets")
+    expect(selects[0].options.map((option) => option.title)).toEqual([
+      "Cancel",
+      "Ignore and continue",
+      "  opencode.json (password value)",
+    ])
+    expect(selects[0].options[2].disabled).toBe(true)
+    expect(commits).toEqual([])
+    expect(run(repo, "diff", "--cached", "--name-only").trim()).toBe("opencode.json")
+    expect(run(remote, "log", "-1", "--format=%s").trim()).toBe("initial")
+    expect(toasts.at(-1)?.message).toBe("Config sync cancelled; the changes stay staged")
+  })
+
+  test("commits possible secrets only after Ignore", async () => {
+    const { repo, remote } = syncedRepo()
+    write(join(repo, ".env"), "X=1\n")
+    const { command } = await start(repo, {}, ["ignore", "add env"])
+
+    await command("config-sync.sync")
+    expect(run(remote, "log", "-1", "--format=%s").trim()).toBe("add env")
   })
 
   test("says so when a sync is already running", async () => {
